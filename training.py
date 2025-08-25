@@ -1,6 +1,11 @@
 #! pip install bitsandbytes accelerate transformers datasets bertviz polars peft tqdm evaluate scikit-learn py7zr --quiet
 #! huggingface-cli login
-
+'''
+in case need to unzip files
+import py7zr
+with py7zr.SevenZipFile("Meta-Llama-3-8B-Instruct.7z", mode='r') as z:
+    z.extractall(path="./project")
+'''
 # How to Finetune Llama 3 for Sequence Classification
 import polars as pl
 import os
@@ -39,14 +44,14 @@ def data_preprocesing(row):
     return tokenizer(row['signal'], truncation=True, max_length=1024)
   
 # for multiclass
-def compute_metrics(evaluations):
+def compute_metrics_multiclass(evaluations):
     predictions, labels = evaluations
     predictions = np.argmax(predictions, axis=1)
     return {'balanced_accuracy' : balanced_accuracy_score(predictions, labels),
     'accuracy':accuracy_score(predictions,labels)}
   
 # for binary
-def compute_metrics(pred):
+def compute_metrics_binary(pred):
     logits, labels = pred
     print(type(logits))
     # Convert logits to probabilities
@@ -64,7 +69,7 @@ def compute_metrics(pred):
   
   # for multi class
 
-class CustomTrainer(Trainer):
+class CustomTrainer_Multiclass(Trainer):
     def __init__(self, *args, class_weights=None, **kwargs):
         super().__init__(*args, **kwargs)
         if class_weights is not None:
@@ -90,7 +95,7 @@ class CustomTrainer(Trainer):
 # for binary class
 from transformers import Trainer, TrainingArguments
 import torch.nn.functional as F
-class CustomTrainer(Trainer):
+class CustomTrainer_Binary(Trainer):
     def __init__(self, *args, class_weights=None, **kwargs):
         super().__init__(*args, **kwargs)
         if class_weights is not None:
@@ -194,30 +199,42 @@ print(len(test_ds),len(train_ds),len(valid_ds),len(dataset))
 #     bnb_4bit_use_double_quant = True, 
 #     bnb_4bit_compute_dtype = torch.bfloat16 
 # )
+quantization_config = BitsAndBytesConfig(
+    load_in_8bit = True,
+    bnb_8bit_compute_dtype = torch.float16,
+    bnb_8bit_use_double_quant = False,
+)
 
 # model_name = "bert-base-uncased"
 # model_path = "/project/Meta-Llama-3-8B-Instruct"
 # model_path = "/project/Meta-Llama-3-8B"
+
+torch.cuda.empty_cache()
+
 model_path = "meta-llama/Llama-3.2-1B-Instruct"
 
 model = AutoModelForSequenceClassification.from_pretrained(
 	model_path, 
 	num_labels=1, 
-	# quantization_config=quantization_config,
+	quantization_config=quantization_config,
 	device_map='auto',
 )
 
 lora_config = LoraConfig(
 	r = 16, 
-	lora_alpha = 8,
+	lora_alpha = 32,
 	target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj'],
-	lora_dropout = 0.05, 
+	lora_dropout = 0.1, 
 	bias = 'none',
-	task_type = 'SEQ_CLS'
+	task_type = 'SEQ_CLS',
+    modules_to_save = ['score'] # for classification head
 )
 # for GPU quantization
-# model = prepare_model_for_kbit_training(model)
+model = prepare_model_for_kbit_training(model)
 model = get_peft_model(model, lora_config)
+
+model.config.gradient_checkpointing = True
+model.gradient_checkpointing_enable()
 
 '''
 	Here, we import the AutoTokenizer class from the transformers library
@@ -270,34 +287,51 @@ training_args = TrainingArguments(
 	eval_strategy = 'epoch',
 	save_strategy = 'epoch',
 	load_best_model_at_end = True,
-	report_to="none"
+	report_to="none",
+    fp16 = True,
+    gradient_checkpointing = True,
 )
 
-trainer = CustomTrainer(
+trainer = CustomTrainer_Multiclass(
 	model = model,
 	args = training_args,
 	train_dataset = tokenized_data['train'],
 	eval_dataset = tokenized_data['val'],
 	tokenizer = tokenizer,
 	data_collator = collate_fn,
-	compute_metrics = compute_metrics,
+	compute_metrics = compute_metrics_multiclass,
 	# class_weights=None,
 	class_weights=class_weights,
 )
 
 train_result = trainer.train()
+eval_result = trainer.evaluate()
 
 # test ds
 test_predictions = generate_predictions(model,test_ds_small, tokenizer)
 get_metrics_result(test_ds_small['labels'], test_predictions)
 
 #load model for inference
-model_path = "/project/Meta-Llama-3-8B-Instruct"
-peft_model_id = "/project/lora_model/checkpoints"
-model_inference = AutoModelForSequenceClassification.from_pretrained(
-    model_path, 
+# model_path = "/project/Meta-Llama-3-8B-Instruct"
+# peft_model_id = "/project/lora_model/checkpoints"
+torch.cuda.empty_cache()
+lora_path = "lora_model/checkpoint-xxx" # path to the checkpoint folder
+peft_model = AutoPeftModelForSequenceClassification.from_pretrained(
+    lora_path,
     num_labels=1, 
     # quantization_config=quantization_config,
     device_map='auto',
 )
-model_inference.load_adapter(peft_model_id)
+
+tokenizer = AutoTokenizer.from_pretrained(model_path, add_prefix_space=True)
+tokenizer.pad_token_id = tokenizer.eos_token_id
+tokenizer.pad_token = tokenizer.eos_token
+
+#config model
+peft_model.config.pad_token_id = tokenizer.pad_token_id
+peft_model.config.use_cache = False
+peft_model.config.pretraining_tp = 1 # tensor parallelism degree
+
+prediction = generate_predictions(peft_model,test_ds_small, tokenizer).flatten()
+get_metrics_result(test_ds_small['labels'], prediction)
+# model_inference.load_adapter(peft_model_id)
