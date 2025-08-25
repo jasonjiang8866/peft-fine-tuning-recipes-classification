@@ -1,3 +1,6 @@
+#!huggingface-cli login
+#!pip install -q bitsandbytes accelerate transformers datasets bertviz polars peft tqdm evaluate scikit-learn py7zr huggingface_hub
+#!pip install -q bitsandbytes accelerate transformers datasets  peft tqdm evaluate scikit-learn huggingface_hub
 import numpy as np, torch
 from datasets import load_dataset
 from transformers import (AutoTokenizer, AutoModelForSequenceClassification,
@@ -60,35 +63,49 @@ def compute_metrics(eval_pred):
 
 # 6) Trainer (override loss only if using weights)
 class WeightedTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        # if not using weights, fall back to default
         if not USE_CLASS_WEIGHTS:
-            return super().compute_loss(model, inputs, return_outputs)
+            return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+
+        # Hugging Face Trainer expects labels in inputs
         labels = inputs.pop("labels")
+
+        # forward pass
         outputs = model(**inputs)
-        loss = F.cross_entropy(outputs.logits, labels, weight=class_weights.to(outputs.logits.device))
+        logits = outputs.logits
+
+        # weighted loss
+        loss = F.cross_entropy(
+            logits, 
+            labels, 
+            weight=class_weights.to(logits.device)
+        )
+
         return (loss, outputs) if return_outputs else loss
 
 args = TrainingArguments(
     output_dir="ag_news_lora",
     learning_rate=2e-4,
-    per_device_train_batch_size=8,
-    per_device_eval_batch_size=8,
+    per_device_train_batch_size=64,
+    per_device_eval_batch_size=64,
     gradient_accumulation_steps=1,
     num_train_epochs=1,               # bump to 3–5 for real runs
     logging_steps=50,
-    evaluation_strategy="epoch",
+    eval_strategy="epoch",
     save_strategy="epoch",
     load_best_model_at_end=True,
     report_to="none",
-    fp16=True,
-    gradient_checkpointing=True,
+    # fp16=True,
+    bf16=True, # set to True if using A100 or 3090+ with latest drivers
+    gradient_checkpointing=False, # disable for speed unless memory is tight
     warmup_ratio=0.1
 )
 
 trainer = WeightedTrainer(
     model=model, args=args,
     train_dataset=train_t, eval_dataset=val_t,
-    tokenizer=tok, compute_metrics=compute_metrics
+    processing_class=tok, compute_metrics=compute_metrics
 )
 
 trainer.train()
