@@ -126,7 +126,7 @@ The training process generates interactive HTML visualizations of the training p
 
 ### Training Loss Visualization
 
-![Training Loss](https://github.com/user-attachments/assets/6124a3a0-4f62-47de-b820-553bd57dfeb8)
+![Training Loss](assets/loss.png)
 
 The training process automatically generates `train_loss.html` with an interactive Plotly chart showing:
 - Training loss per step
