@@ -1,0 +1,45 @@
+[project]
+name = "peft-fine-tuning-recipes-classification"
+version = "0.1.0"
+description = "PEFT (Parameter Efficient Fine-Tuning) fine-tuning recipes for text classification using LoRA and Llama models"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0.0",
+    "transformers>=4.30.0",
+    "datasets>=2.14.0",
+    "peft>=0.4.0",
+    "bitsandbytes>=0.41.0",
+    "accelerate>=0.20.0",
+    "scikit-learn>=1.3.0",
+    "numpy>=1.24.0",
+    "tqdm>=4.65.0",
+    "evaluate>=0.4.0",
+    "huggingface_hub>=0.16.0",
+    "plotly>=5.15.0",
+    "polars>=0.18.0",
+    "bertviz>=1.4.0",
+    "py7zr>=0.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter>=1.0.0",
+    "notebook>=6.5.0",
+    "ipywidgets>=8.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "jupyter>=1.0.0",
+    "notebook>=6.5.0",
+    "ipywidgets>=8.0.0",
+]
+
+# Entry points for direct script execution
+[project.scripts]
+peft-setup = "jupyter_setup:main"
