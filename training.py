@@ -1,6 +1,7 @@
 #!huggingface-cli login
 #!pip install -q bitsandbytes accelerate transformers datasets bertviz polars peft tqdm evaluate scikit-learn py7zr huggingface_hub
 #!pip install -q bitsandbytes accelerate transformers datasets  peft tqdm evaluate scikit-learn huggingface_hub
+import os
 import numpy as np, torch
 from datasets import load_dataset
 from transformers import (AutoTokenizer, AutoModelForSequenceClassification,
@@ -11,6 +12,13 @@ import torch.nn.functional as F
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 USE_CLASS_WEIGHTS = False  # flip to True if your labels are imbalanced
+
+# Only the standalone benchmark runner sets this. A normal training run is unchanged.
+benchmark = None
+if os.environ.get("PEFT_MUON_BENCHMARK"):
+    from benchmark_muon import BenchmarkRun
+    benchmark = BenchmarkRun.from_environment()
+    benchmark.preflight()
 
 # 1) Data
 ds = load_dataset("ag_news")
@@ -34,6 +42,8 @@ def to_torch(dataset):
 train_t, val_t, test_t = to_torch(train_ds), to_torch(val_ds), to_torch(test_ds)
 
 # 3) Model + LoRA (8-bit base)
+if benchmark:
+    benchmark.before_model_load()
 quant = BitsAndBytesConfig(load_in_8bit=True, bnb_8bit_compute_dtype=torch.float16)
 model = AutoModelForSequenceClassification.from_pretrained(
     MODEL, num_labels=num_labels, quantization_config=quant, device_map="auto"
@@ -101,12 +111,20 @@ args = TrainingArguments(
     gradient_checkpointing=False, # disable for speed unless memory is tight
     warmup_ratio=0.1
 )
+if benchmark:
+    benchmark.configure_args(args)
+
+benchmark_kwargs = benchmark.trainer_kwargs(model, args) if benchmark else {}
 
 trainer = WeightedTrainer(
     model=model, args=args,
     train_dataset=train_t, eval_dataset=val_t,
-    processing_class=tok, compute_metrics=compute_metrics
+    processing_class=tok, compute_metrics=compute_metrics,
+    **benchmark_kwargs
 )
 
-trainer.train()
-print(trainer.evaluate(test_t))
+train_result = trainer.train()
+test_metrics = trainer.evaluate(test_t)
+print(test_metrics)
+if benchmark:
+    benchmark.write_result(trainer, train_result, test_metrics)

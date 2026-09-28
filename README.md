@@ -120,6 +120,72 @@ uv run python training.py
    jupyter notebook finetuning.ipynb
    ```
 
+## Optional Muon benchmark
+
+`python training.py` and `python setup.py train` still use Hugging Face Trainer's
+default AdamW optimizer. To compare that path with built-in `torch.optim.Muon`,
+run the separate benchmark on a CUDA GPU with access to the gated Llama model:
+
+```bash
+python benchmark_muon.py --output-dir benchmark_runs
+# Short functional run, using the same limits in both independent processes:
+python benchmark_muon.py --output-dir benchmark_smoke --max-steps 20 --batch-size 8
+```
+
+Each process builds a fresh model and uses seed 42 before initializing the
+classification head. The benchmark retains AG News, 8-bit base weights, the
+LoRA configuration, warmup, and the one-epoch training recipe. Both arms use
+the same batch size and number of steps. The AdamW arm leaves Trainer's
+optimizer selection intact. The Muon arm updates only LoRA matrices with
+`torch.optim.Muon` (default benchmark LR 0.02); the trainable `score` head is
+updated with `torch.optim.AdamW` (recipe LR 2e-4). These are exploratory
+learning rates, not a tuned optimizer-quality comparison. Use `--muon-lr` to
+try other values. Benchmark runs log loss every step and disable checkpoints;
+they evaluate the final model on the same AG News test split.
+
+The recipe's `r=16`, `bias="none"`, and four attention projection targets imply
+two matrix adapters per projection per layer. For the model's 16 layers,
+2048 hidden units, and 512 key/value projection outputs, the expected shapes
+are:
+
+| Trainable target | LoRA A per layer | LoRA B per layer | Matrix count |
+| --- | --- | --- | ---: |
+| `q_proj`, `o_proj` | `[16, 2048]` | `[2048, 16]` | 64 |
+| `k_proj`, `v_proj` | `[16, 2048]` | `[512, 16]` | 64 |
+| Saved `score` head | — | `[4, 2048]` | 1 |
+
+That is **128 trainable 2D LoRA matrices plus one 2D classifier weight**,
+approximately 3,416,064 trainable elements in total. The head has no bias.
+The runner
+inspects `model.named_parameters()` *after* PEFT wraps the model; it records
+every actual trainable name, shape, and dimension in `adamw.json` and
+`muon.json`, and rejects any non-2D LoRA tensor before constructing Muon.
+Additional trainable tensors, if introduced by a library/config change, go
+to AdamW in the Muon arm. The base model stays frozen.
+
+`comparison.json` summarizes final test accuracy/F1, mean training step time
+(CUDA synchronized, excluding the first five optimizer steps by default),
+and peak allocated/reserved CUDA MiB per device. Each arm's JSON also contains
+per-step loss and step times, total training loss, exact parameter audit, and
+library versions. Peak CUDA memory is measured from before model loading
+through test evaluation. Step timing excludes data preparation, initial model
+loading, validation and test evaluation. A short `--max-steps` run checks the
+code path but its final accuracy is not a convergence result.
+
+The project-wide minimum is Python >=3.9 and torch >=2.0. Environments differ:
+
+| Environment | What runs | Upgrade for the Muon arm |
+| --- | --- | --- |
+| Checked-in `uv.lock`: torch 2.8.0 | AdamW; Muon recorded as skipped | Install PyTorch >=2.9 with matching CUDA wheel/driver in an isolated environment |
+| Python 3.9 | Existing recipe (if its dependencies resolve) | Also move to Python >=3.10 for PyTorch >=2.9 |
+| PyTorch build exposing `torch.optim.Muon` | Both benchmark arms | None; the runner detects the feature directly |
+| `tonyf/muonium` experiment | Outside this benchmark | Python >=3.12 and PyTorch >=2.12.1 |
+
+PyTorch 2.9 introduced the [built-in optimizer](https://docs.pytorch.org/docs/stable/generated/torch.optim.Muon.html).
+[`tonyf/muonium`](https://github.com/tonyf/muonium) is a separate DTensor-based
+implementation and is not installed by this patch. The project's minimum
+dependency and lockfile are unchanged.
+
 ## Training Results Visualization
 
 The training process generates interactive HTML visualizations of the training progress:
