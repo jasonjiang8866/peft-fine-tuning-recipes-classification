@@ -120,6 +120,120 @@ uv run python training.py
    jupyter notebook finetuning.ipynb
    ```
 
+## Optional Muon benchmark
+
+`python training.py` and `python setup.py train` still use Hugging Face Trainer's
+default AdamW optimizer. To compare that path with built-in `torch.optim.Muon`,
+run the separate benchmark on a CUDA GPU with access to the gated Llama model:
+
+```bash
+python benchmark_muon.py --output-dir benchmark_runs
+# Short functional run, using the same limits in both independent processes:
+python benchmark_muon.py --output-dir benchmark_smoke --max-steps 20 --batch-size 8
+```
+
+Each process builds a fresh model and uses seed 42 before initializing the
+classification head. The benchmark retains AG News, 8-bit base weights, the
+LoRA configuration, warmup, and the one-epoch training recipe. Both arms use
+the same batch size and number of steps. The AdamW arm leaves Trainer's
+optimizer selection intact. The Muon arm updates only LoRA matrices with
+`torch.optim.Muon` (default benchmark LR 0.02); the trainable `score` head is
+updated with `torch.optim.AdamW` (recipe LR 2e-4). These are exploratory
+learning rates, not a tuned optimizer-quality comparison. Use `--muon-lr` to
+try other values. Benchmark runs log loss every step and disable checkpoints;
+they evaluate the final model on the same AG News test split.
+
+The recipe's `r=16`, `bias="none"`, and four attention projection targets imply
+two matrix adapters per projection per layer. For the model's 16 layers,
+2048 hidden units, and 512 key/value projection outputs, the expected shapes
+are:
+
+| Trainable target | LoRA A per layer | LoRA B per layer | Matrix count |
+| --- | --- | --- | ---: |
+| `q_proj`, `o_proj` | `[16, 2048]` | `[2048, 16]` | 64 |
+| `k_proj`, `v_proj` | `[16, 2048]` | `[512, 16]` | 64 |
+| Saved `score` head | — | `[4, 2048]` | 1 |
+
+That is **128 trainable 2D LoRA matrices plus one 2D classifier weight**,
+approximately 3,416,064 trainable elements in total. The head has no bias.
+The runner
+inspects `model.named_parameters()` *after* PEFT wraps the model; it records
+every actual trainable name, shape, and dimension in `adamw.json` and
+`muon.json`, and rejects any non-2D LoRA tensor before constructing Muon.
+Additional trainable tensors, if introduced by a library/config change, go
+to AdamW in the Muon arm. The base model stays frozen.
+
+`comparison.json` summarizes final test accuracy/F1, mean training step time
+(CUDA synchronized, excluding the first five optimizer steps by default),
+and peak allocated/reserved CUDA MiB per device. Each arm's JSON also contains
+per-step loss and step times, total training loss, exact parameter audit, and
+library versions. Peak CUDA memory is measured from before model loading
+through test evaluation. Step timing excludes data preparation, initial model
+loading, validation and test evaluation. A short `--max-steps` run checks the
+code path but its final accuracy is not a convergence result.
+
+The project-wide minimum is Python >=3.9 and torch >=2.0. Environments differ:
+
+| Environment | What runs | Upgrade for the Muon arm |
+| --- | --- | --- |
+| Checked-in `uv.lock`: torch 2.8.0 | AdamW; Muon recorded as skipped | Install PyTorch >=2.9 with matching CUDA wheel/driver in an isolated environment |
+| Python 3.9 | Existing recipe (if its dependencies resolve) | Also move to Python >=3.10 for PyTorch >=2.9 |
+| PyTorch build exposing `torch.optim.Muon` | Both benchmark arms | None; the runner detects the feature directly |
+| `tonyf/muonium` experiment | Outside this benchmark | Python >=3.12 and PyTorch >=2.12.1 |
+
+PyTorch 2.9 introduced the [built-in optimizer](https://docs.pytorch.org/docs/stable/generated/torch.optim.Muon.html).
+[`tonyf/muonium`](https://github.com/tonyf/muonium) is a separate DTensor-based
+implementation and is not installed by this patch. The project's minimum
+dependency and lockfile are unchanged.
+
+### Regression tests and CI
+
+Run the lightweight suite from the repository root; it uses only `unittest`
+and the Python standard library. `-S` disables site packages, so this command
+requires no torch, Transformers, GPU, credentials, or model/dataset downloads:
+
+```bash
+python -S -m unittest discover -s tests -v
+```
+
+The tests use synthetic parameter names/shapes (including the expected 128
+LoRA matrices), exclude frozen tensors, reject non-2D LoRA, route the score
+head and other trainable tensors to AdamW, and check feature detection and
+optimizer delegation. They execute `training.py` with inert dependency doubles
+to check that an unset/empty benchmark switch imports no benchmark code,
+passes no optimizer/callback overrides, and preserves the default arguments.
+This verifies entry-point wiring, not a real Trainer training run.
+
+CI runs that suite on Python 3.9–3.14 without installing project dependencies.
+A separate Python 3.12 job installs only `torch==2.9.0` from the CPU wheel index
+and runs `tests/test_optimizer_pair_cpu.py`. Locally, in an environment with
+native Muon, run it with:
+
+```bash
+python -m unittest discover -s tests -p test_optimizer_pair_cpu.py -v
+```
+
+That CPU test performs real Muon and AdamW updates on tiny synthetic tensors,
+checks distinct learning rates under `LambdaLR` linear warmup/decay (the
+mechanism used by Trainer's default linear schedule), and checks optimizer +
+scheduler state restoration against uninterrupted execution. It is explicitly
+skipped when torch or native Muon is absent, including in the stdlib CI job.
+
+`OptimizerPair.param_groups` shares the children's dictionaries so scheduler
+updates reach both optimizers; `load_state_dict` must reconnect those references
+after child optimizers replace their groups. The pair's outer `.state` does
+not represent the child states; its `state_dict()` uses nested `muon`/`adamw`
+entries. CPU coverage does not establish compatibility with every
+Trainer/Accelerate version, mixed precision, checkpoint orchestration, or
+integrations that inspect optimizer internals. Benchmark checkpoints remain
+disabled, and distributed execution is outside this runner's scope.
+
+The actual 8-bit/bf16 PEFT recipe still needs the CUDA smoke run above to
+validate Trainer/Accelerate wrapping, quantized model gradients, device
+placement, and callbacks. CUDA timing/memory measurements and any performance
+or convergence comparison require real GPU runs; passing CI supplies none of
+those results. No default dependency requirement or lockfile is changed.
+
 ## Training Results Visualization
 
 The training process generates interactive HTML visualizations of the training progress:
@@ -257,3 +371,19 @@ If you use this code in your research, please consider citing:
 - [Microsoft](https://github.com/microsoft/LoRA) for the LoRA technique
 - [Meta](https://ai.meta.com/llama/) for the Llama model series
 - [Plotly](https://plotly.com/) for visualization capabilities
+
+### RunPod CUDA end-to-end validation
+
+The isolated [RunPod deployment kit](runpod/README.md) provides a bootstrap script,
+Dockerfile and Pod template settings, plus small smoke/checkpoint-resume and
+three-seed performance profiles. It reuses the benchmark optimizer and records
+actual Trainer/Accelerate wrapping, int8 layers, bf16 autocast, per-step loss/LR,
+CUDA timing, throughput and memory, and accuracy/F1. Existing default training
+and dependency minimums are unchanged.
+
+Start with `bash runpod/bootstrap.sh`, then
+`bash runpod/run.sh --config runpod/configs/smoke.json --output /workspace/results/smoke-001`
+on a single-GPU RunPod with Hugging Face model access. Follow the deployment guide
+before running the performance profile. A separate CPU CI job validates real
+Trainer/PEFT/Accelerate checkpoint resume without downloads; this does not certify
+the Docker image, CUDA kernels, quantized training or GPU benchmark results.

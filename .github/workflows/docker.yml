@@ -1,0 +1,80 @@
+name: RunPod Docker build and offline checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the checked image to GHCR (main only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runpod-docker-${{ github.event.pull_request.number || github.ref }}
+  # Do not interrupt a main publication or race two publications of the same SHA.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  docker-offline:
+    name: CUDA image build / offline checks (no GPU training)
+    # Exactly one job builds per run. All non-publishing events stay read-only.
+    if: >-
+      ${{ !(github.repository == 'jasonjiang8866/peft-fine-tuning-recipes-classification' &&
+        github.ref == 'refs/heads/main' &&
+        (github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish))) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/runpod-image
+
+  publish:
+    name: Checked CUDA image / GHCR publication (no GPU training)
+    # No PR, fork, arbitrary ref input, release tag, or pull_request_target publisher.
+    if: >-
+      ${{ github.repository == 'jasonjiang8866/peft-fine-tuning-recipes-classification' &&
+        github.ref == 'refs/heads/main' &&
+        (github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish)) }}
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+      image-reference: ${{ steps.publish.outputs.image-reference }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/runpod-image
+      # Default success() is intentional: failed builds/checks cannot log in or push.
+      - name: Log in to GHCR after offline checks pass
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the verified image and record its registry digest
+        id: publish
+        env:
+          PUBLISH_REQUESTED: ${{ inputs.publish }}
+        run: python3 .github/scripts/publish_image.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: runpod-ghcr-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ghcr-publication/
+          if-no-files-found: ignore
+          retention-days: 90

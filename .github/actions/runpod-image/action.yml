@@ -1,0 +1,45 @@
+name: Build and check the RunPod CUDA image
+description: Build once and validate the local image offline, without GPU training
+runs:
+  using: composite
+  steps:
+    - name: Make room for CUDA wheels on the disposable runner
+      shell: bash
+      run: |
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+        df -h /
+    - name: Build the actual RunPod image (linux/amd64)
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p docker-checks
+        git rev-parse HEAD | tee docker-checks/source-commit.txt
+        docker build --pull --platform linux/amd64 --progress=plain \
+          -f runpod/Dockerfile --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)" \
+          --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+          --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+          --iidfile docker-checks/image-id.txt \
+          -t peft-muon:ci . 2>&1 | tee docker-checks/build.log
+    - name: Check installed environment, CLI, profiles and default startup offline
+      shell: bash
+      run: |
+        set -euo pipefail
+        bash runpod/check-image.sh "$(cat docker-checks/image-id.txt)" docker-checks
+        cp docker-checks/image-id.txt docker-checks/verified-image-id.txt
+    - name: Record verification boundary
+      if: always()
+      shell: bash
+      run: |
+        {
+          echo '## RunPod container verification'
+          echo 'See step outcomes and docker-checks logs for this commit.'
+          echo 'Build uses CUDA 12.8 wheels; runtime checks use --network none, no GPU and no HF_TOKEN.'
+          echo 'Passing means image build/imports/CLI/configs work and startup rejects a missing GPU.'
+          echo '**Not validated:** CUDA kernels, 8-bit/bf16 training, GPU checkpoint resume or performance.'
+        } >> "$GITHUB_STEP_SUMMARY"
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      if: always()
+      with:
+        name: runpod-docker-checks-${{ github.run_id }}-${{ github.run_attempt }}
+        path: docker-checks/
+        retention-days: 14
