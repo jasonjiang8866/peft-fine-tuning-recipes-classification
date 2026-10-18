@@ -51,13 +51,98 @@ a nonzero exit, never a silently substituted CPU/full-precision experiment.
 
 ## Reusable custom container template
 
-Build/push this image from your machine or image-build service (Docker is not
-required inside the GPU Pod):
+### Preferred: use the checked GHCR image
+
+The Docker workflow can publish to
+`ghcr.io/jasonjiang8866/peft-fine-tuning-recipes-classification`. **Adding this
+workflow to PR #6 does not publish an image.** Merge the reviewed PR into `main`
+first. Its push run builds and checks the merged commit, then publishes only if
+all build/offline checks pass. A merge or squash commit can have a different SHA
+from the PR head; use the publication run's SHA and receipt.
+
+| Event | Behavior |
+|---|---|
+| Any `pull_request`, including same-repository and fork PRs | Read-only build/offline checks; no GHCR login or publication |
+| Push to `main` in this repository | Build, offline checks, then publish the same local image |
+| Manual `workflow_dispatch`, default `publish=false` | Read-only build/offline checks |
+| Manual `workflow_dispatch` on `main`, `publish=true` | Explicitly request build/check/publication; requires Actions write access |
+| Manual run on another branch, even with `publish=true`, or a fork | Read-only checks; publication is blocked |
+
+After merge, a maintainer can use **Actions → RunPod Docker build and offline
+checks → Run workflow**, select `main`, and enable `publish` to retry a failed
+publication. There is no arbitrary source-ref input, tag/release publishing,
+`pull_request_target` or `workflow_run` publishing path. Protect `main` with the
+repository's normal review/branch rules: merging code there is the trust boundary.
+
+The read-only job has `contents: read`. Only the gated publisher has
+`contents: read` and `packages: write`, authenticating with the ephemeral
+`GITHUB_TOKEN`; no publishing PAT secret is needed. Third-party actions in this
+workflow are pinned to commit SHAs. Both jobs share the same build/check action,
+and exactly one builds per run. The publisher logs in only after checks succeed,
+tags the verified Docker image ID without rebuilding, pushes it, then pulls its
+registry digest and checks that it resolves to the same image ID.
+
+A successful publication produces:
+
+- A source tag: `ghcr.io/jasonjiang8866/peft-fine-tuning-recipes-classification:sha-<full-40-character-commit-SHA>`.
+- An immutable reference: `ghcr.io/jasonjiang8866/peft-fine-tuning-recipes-classification@sha256:<64-hex-registry-digest>`.
+- The reference in the Actions run summary and the publisher job's
+  `image-reference`/`digest` outputs; the
+  `runpod-ghcr-publication-<run-id>-<attempt>` artifact contains `runpod-image.txt`,
+  `image.json` (source SHA, image ID, tag, digest and run URL) and publication logs.
+  Download the receipt for long-term retention; the artifact expires after 90 days.
+
+Copy the **actual complete line from `runpod-image.txt`** into the RunPod custom
+Pod template's **Container Image** field. The angle-bracket values above are
+placeholders, not published images. Do not use an offline build's local image ID
+as a registry digest. The workflow publishes no `latest` tag. SHA tags identify
+source but are still mutable: rerunning a commit can replace its tag because the
+base image, OS packages and transitive dependencies are not fully locked. Reuse
+the **digest** for repeatable deployment/rollback; rebuilds are not promised to be
+bit-for-bit identical. Preserve referenced package versions when cleaning GHCR.
+
+### GHCR visibility and access
+
+Check the package's own **Package settings** after its first successful push.
+New container packages default to private; a public GitHub repository does not
+guarantee an anonymously pullable container. This workflow does not change package
+visibility.
+
+- **Public image:** a package admin can deliberately make the package public.
+  RunPod then pulls anonymously; no registry credential is needed. Verify a pull
+  by digest using a Docker client without cached GHCR credentials.
+- **Private image:** keep it private and configure RunPod **Registry credentials**
+  for `ghcr.io`: GitHub username plus a classic PAT with only `read:packages` and
+  access to this package (authorize SSO if required). Select that credential in
+  the private Pod template. Registry authentication is needed **before** the
+  container starts; setting a token as a Pod environment variable is insufficient.
+  Never copy the workflow's short-lived `GITHUB_TOKEN` into RunPod. Keep registry
+  credentials out of git, image build args, logs and shared templates.
+
+If publication returns `permission_denied`/403, check repository/organization
+Actions policy for the job's requested `packages: write`, package-creation policy,
+and the package's Actions access. A pre-existing package created outside this
+workflow may need to be connected to this repository and grant it **Write** under
+**Manage Actions access**. The OCI source/revision labels and `GITHUB_TOKEN`
+publication associate new images with the repository. Repository write access
+alone does not prove an existing package permits publication. Fix access and
+retry the explicit `main` dispatch; do not treat a failed push as a release. If a
+push succeeds but digest confirmation fails, a registry version may exist, but
+there is no verified deployment receipt: investigate and rerun before using it.
+
+GitHub references: [Container registry authentication, visibility and digest pulls](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry),
+[package access controls](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
+
+### Optional: build and push to your own registry
+
+You can still build/check/push from your machine or an image-build service
+(Docker is not required inside the GPU Pod):
 
 ```bash
 docker build --platform linux/amd64 -f runpod/Dockerfile \
   --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)" \
   -t YOUR_REGISTRY/peft-muon:cu128 .
+bash runpod/check-image.sh YOUR_REGISTRY/peft-muon:cu128 docker-checks
 docker push YOUR_REGISTRY/peft-muon:cu128
 ```
 
@@ -83,8 +168,9 @@ available for subsequent repeats after a successful smoke run.
 The code runs inside `/opt/muon` so mounting `/workspace` does not hide it. The
 container includes its own `/opt/venv`, CUDA runtime wheel libraries, and the
 source revision/hash in reports. The separate Docker workflow builds this image
-and checks it offline. Publishing the image, launching a paid Pod, and actual GPU
-validation still require the target environment; none is implied by container CI.
+and checks it offline, with the gated GHCR publication described above. Launching
+a paid Pod and actual GPU validation still require the target environment; neither
+is implied by build or publication success. The existing bootstrap path is unchanged.
 
 **Stop the Pod after the run.** Script/container exit does not guarantee that GPU
 billing stops. A Pod volume is not a backup: copy results out before terminating
@@ -187,8 +273,9 @@ bitsandbytes kernels, bf16 execution, or performance.
 `.github/workflows/docker.yml` builds the actual `runpod/Dockerfile` for
 `linux/amd64` on each PR and pushes to `main`, separately from the CPU regression
 workflow. PR builds check out the exact PR head and embed its commit ID. The job
-does not publish an image or launch a RunPod Pod. Build logs, image metadata and
-offline-check logs are uploaded even on failure.
+on PRs does not publish; the trusted `main` publisher uses the same offline checks
+before pushing the verified image. No job launches a RunPod Pod. Build logs,
+image metadata and offline-check logs are uploaded even on failure (14-day retention).
 
 After the build, `check-image.sh` runs containers with `--network none`, an empty
 `/workspace` volume, no GPU and no HF token. It checks:
@@ -217,6 +304,7 @@ image is buildable. A green container job does **not** establish CUDA execution,
 until an actual GPU Pod produces passing smoke and performance results.
 
 References: [RunPod templates](https://docs.runpod.io/pods/templates/overview),
+[template fields and private registry credentials](https://docs.runpod.io/pods/templates/manage-templates),
 [custom container templates](https://docs.runpod.io/pods/templates/create-custom-template),
 [PyTorch 2.9 CUDA wheel commands](https://pytorch.org/get-started/previous-versions/),
 [Transformers 4.57.1 bitsandbytes](https://huggingface.co/docs/transformers/v4.57.1/quantization/bitsandbytes).
