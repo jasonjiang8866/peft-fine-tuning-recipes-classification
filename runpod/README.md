@@ -82,9 +82,9 @@ available for subsequent repeats after a successful smoke run.
 
 The code runs inside `/opt/muon` so mounting `/workspace` does not hide it. The
 container includes its own `/opt/venv`, CUDA runtime wheel libraries, and the
-source revision/hash in reports. Building and publishing the image, launching a
-paid Pod, and actual GPU validation must be performed in the target environment;
-none is implied by CPU CI.
+source revision/hash in reports. The separate Docker workflow builds this image
+and checks it offline. Publishing the image, launching a paid Pod, and actual GPU
+validation still require the target environment; none is implied by container CI.
 
 **Stop the Pod after the run.** Script/container exit does not guarantee that GPU
 billing stops. A Pod volume is not a backup: copy results out before terminating
@@ -180,9 +180,41 @@ HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
 CPU integration uses a tiny randomly initialized Llama + real PEFT, Trainer,
 Accelerate and native Muon. No pretrained model or dataset is downloaded. It
 validates checkpoint/resume semantics, including both LR groups, **not** CUDA,
-bitsandbytes kernels, bf16 execution, or performance. The Docker build and GPU
-profiles have not been executed by CPU CI. Actual success is recorded only when
-the Pod generates passing results.
+bitsandbytes kernels, bf16 execution, or performance.
+
+### Independent Docker build / offline checks
+
+`.github/workflows/docker.yml` builds the actual `runpod/Dockerfile` for
+`linux/amd64` on each PR and pushes to `main`, separately from the CPU regression
+workflow. PR builds check out the exact PR head and embed its commit ID. The job
+does not publish an image or launch a RunPod Pod. Build logs, image metadata and
+offline-check logs are uploaded even on failure.
+
+After the build, `check-image.sh` runs containers with `--network none`, an empty
+`/workspace` volume, no GPU and no HF token. It checks:
+
+- Python 3.12 in `/opt/venv`, `RUNPOD_PYTHON`, the source revision, `pip check`,
+  all direct requirements pins, torch 2.9.0 with CUDA 12.8 build metadata and Muon.
+- Real dependency imports, including Trainer/PEFT/Accelerate and bitsandbytes;
+  these are import checks, not GPU kernel execution.
+- `validate.py --help`, `run.sh --help`, the default `--check-config`, and explicit
+  smoke/performance `--check-config` calls from outside the source directory.
+- The original tini ENTRYPOINT and default CMD: smoke/performance/all startup
+  must fail at the explicit missing-CUDA preflight; an invalid suite must fail
+  with exit 2. This is expected-failure coverage, not a passing training run.
+
+Reproduce from the checked-out repository on a Docker host:
+
+```bash
+docker build --platform linux/amd64 -f runpod/Dockerfile \
+  --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)" -t peft-muon:ci .
+bash runpod/check-image.sh peft-muon:ci docker-checks
+```
+
+Consult the Docker workflow result for the specific commit before claiming its
+image is buildable. A green container job does **not** establish CUDA execution,
+8-bit/bf16 training, GPU checkpoint resume or performance. Those remain unverified
+until an actual GPU Pod produces passing smoke and performance results.
 
 References: [RunPod templates](https://docs.runpod.io/pods/templates/overview),
 [custom container templates](https://docs.runpod.io/pods/templates/create-custom-template),
