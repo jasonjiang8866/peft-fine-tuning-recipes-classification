@@ -371,3 +371,19 @@ If you use this code in your research, please consider citing:
 - [Microsoft](https://github.com/microsoft/LoRA) for the LoRA technique
 - [Meta](https://ai.meta.com/llama/) for the Llama model series
 - [Plotly](https://plotly.com/) for visualization capabilities
+
+### RunPod CUDA end-to-end validation
+
+The isolated [RunPod deployment kit](runpod/README.md) provides a bootstrap script,
+Dockerfile and Pod template settings, plus small smoke/checkpoint-resume and
+three-seed performance profiles. It reuses the benchmark optimizer and records
+actual Trainer/Accelerate wrapping, int8 layers, bf16 autocast, per-step loss/LR,
+CUDA timing, throughput and memory, and accuracy/F1. Existing default training
+and dependency minimums are unchanged.
+
+Start with `bash runpod/bootstrap.sh`, then
+`bash runpod/run.sh --config runpod/configs/smoke.json --output /workspace/results/smoke-001`
+on a single-GPU RunPod with Hugging Face model access. Follow the deployment guide
+before running the performance profile. A separate CPU CI job validates real
+Trainer/PEFT/Accelerate checkpoint resume without downloads; this does not certify
+the Docker image, CUDA kernels, quantized training or GPU benchmark results.

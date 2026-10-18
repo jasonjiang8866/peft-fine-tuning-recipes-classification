@@ -1,0 +1,23 @@
+{
+  "model": "meta-llama/Llama-3.2-1B-Instruct",
+  "model_revision": "main",
+  "dataset": "fancyzhx/ag_news",
+  "dataset_revision": "main",
+  "seeds": [42, 43, 44],
+  "max_steps": 200,
+  "checkpoint_step": 0,
+  "skip_steps": 20,
+  "train_samples": 8192,
+  "eval_samples": 1024,
+  "max_length": 512,
+  "batch_size": 8,
+  "eval_batch_size": 8,
+  "gradient_accumulation_steps": 1,
+  "learning_rate": 0.0002,
+  "muon_lr": 0.02,
+  "warmup_ratio": 0.1,
+  "weight_decay": 0.0,
+  "expected_lora_matrices": 128,
+  "resume_atol": 0.00001,
+  "resume_rtol": 0.0001
+}

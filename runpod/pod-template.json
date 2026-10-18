@@ -1,0 +1,19 @@
+{
+  "description": "RunPod Console template field reference; not an API request or an importable RunPod template ID.",
+  "name": "PEFT Muon CUDA validation",
+  "container_image": "YOUR_REGISTRY/peft-muon:cu128",
+  "container_start_command": "bash /opt/muon/runpod/container-start.sh",
+  "container_disk_gb": 30,
+  "volume_disk_gb": 80,
+  "volume_mount_path": "/workspace",
+  "gpu_count": 1,
+  "suggested_gpu": "A40 48GB or A100 40GB/80GB; native bf16 required",
+  "exposed_ports": [],
+  "environment": {
+    "RUN_SUITE": "smoke",
+    "HF_HOME": "/workspace/hf-cache",
+    "RESULTS_ROOT": "/workspace/results",
+    "CUDA_VISIBLE_DEVICES": "0"
+  },
+  "runtime_secret": "HF_TOKEN: inject in RunPod; account must have access to meta-llama/Llama-3.2-1B-Instruct"
+}
