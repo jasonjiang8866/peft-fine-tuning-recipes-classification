@@ -186,6 +186,54 @@ PyTorch 2.9 introduced the [built-in optimizer](https://docs.pytorch.org/docs/st
 implementation and is not installed by this patch. The project's minimum
 dependency and lockfile are unchanged.
 
+### Regression tests and CI
+
+Run the lightweight suite from the repository root; it uses only `unittest`
+and the Python standard library. `-S` disables site packages, so this command
+requires no torch, Transformers, GPU, credentials, or model/dataset downloads:
+
+```bash
+python -S -m unittest discover -s tests -v
+```
+
+The tests use synthetic parameter names/shapes (including the expected 128
+LoRA matrices), exclude frozen tensors, reject non-2D LoRA, route the score
+head and other trainable tensors to AdamW, and check feature detection and
+optimizer delegation. They execute `training.py` with inert dependency doubles
+to check that an unset/empty benchmark switch imports no benchmark code,
+passes no optimizer/callback overrides, and preserves the default arguments.
+This verifies entry-point wiring, not a real Trainer training run.
+
+CI runs that suite on Python 3.9–3.14 without installing project dependencies.
+A separate Python 3.12 job installs only `torch==2.9.0` from the CPU wheel index
+and runs `tests/test_optimizer_pair_cpu.py`. Locally, in an environment with
+native Muon, run it with:
+
+```bash
+python -m unittest discover -s tests -p test_optimizer_pair_cpu.py -v
+```
+
+That CPU test performs real Muon and AdamW updates on tiny synthetic tensors,
+checks distinct learning rates under `LambdaLR` linear warmup/decay (the
+mechanism used by Trainer's default linear schedule), and checks optimizer +
+scheduler state restoration against uninterrupted execution. It is explicitly
+skipped when torch or native Muon is absent, including in the stdlib CI job.
+
+`OptimizerPair.param_groups` shares the children's dictionaries so scheduler
+updates reach both optimizers; `load_state_dict` must reconnect those references
+after child optimizers replace their groups. The pair's outer `.state` does
+not represent the child states; its `state_dict()` uses nested `muon`/`adamw`
+entries. CPU coverage does not establish compatibility with every
+Trainer/Accelerate version, mixed precision, checkpoint orchestration, or
+integrations that inspect optimizer internals. Benchmark checkpoints remain
+disabled, and distributed execution is outside this runner's scope.
+
+The actual 8-bit/bf16 PEFT recipe still needs the CUDA smoke run above to
+validate Trainer/Accelerate wrapping, quantized model gradients, device
+placement, and callbacks. CUDA timing/memory measurements and any performance
+or convergence comparison require real GPU runs; passing CI supplies none of
+those results. No default dependency requirement or lockfile is changed.
+
 ## Training Results Visualization
 
 The training process generates interactive HTML visualizations of the training progress:
