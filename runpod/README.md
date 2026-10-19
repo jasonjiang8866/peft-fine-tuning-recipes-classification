@@ -22,10 +22,11 @@ In the Pod terminal:
 
 ```bash
 cd /workspace
-git clone --branch benchmark/optional-muon --single-branch \
+git clone --branch main --single-branch \
   https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification.git
 cd peft-fine-tuning-recipes-classification
-# For repeatable reruns, checkout the exact reviewed PR commit here.
+# Optional: match the source revision of the published image below.
+# git checkout bfdf5d3580036b11876fe2264c6d92499913c681
 bash runpod/bootstrap.sh
 
 # Each output directory must be new. Both arms run in separate Python processes.
@@ -53,12 +54,27 @@ a nonzero exit, never a silently substituted CPU/full-precision experiment.
 
 ### Preferred: use the checked GHCR image
 
-The Docker workflow can publish to
-`ghcr.io/jasonjiang8866/peft-fine-tuning-recipes-classification`. **Adding this
-workflow to PR #6 does not publish an image.** Merge the reviewed PR into `main`
-first. Its push run builds and checks the merged commit, then publishes only if
-all build/offline checks pass. A merge or squash commit can have a different SHA
-from the PR head; use the publication run's SHA and receipt.
+PR #6 is merged. The checked image from source commit
+`bfdf5d3580036b11876fe2264c6d92499913c681` was published successfully on
+2026-10-18 at 21:53 UTC by [Actions run 39169212976](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/39169212976).
+Copy this immutable reference into RunPod's **Container Image** field:
+
+```text
+ghcr.io/jasonjiang8866/peft-fine-tuning-recipes-classification@sha256:631a1ae62d4592324aaab894c8e0887c375830463443f150e15582269c1af71a
+```
+
+`pod-template.json` pins this same digest. The publication receipt is
+[`runpod-ghcr-publication-39169212976-1` (artifact 12151654106)](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/39169212976/artifacts/12151654106).
+The run verified Docker build, offline checks, publication and pull-by-digest
+identity. **Real RunPod CUDA, 8-bit/bf16 training, GPU checkpoint resume and
+Muon/AdamW performance remain unverified.**
+
+This pin deliberately remains on that published source revision even when
+`main` advances or a newer image is published. The image's bundled README/template
+also remain at that revision; use this repository's updated deployment reference.
+For a future release, update the pin only from its successful publication receipt.
+The Docker workflow publishes to
+`ghcr.io/jasonjiang8866/peft-fine-tuning-recipes-classification` as follows:
 
 | Event | Behavior |
 |---|---|
@@ -68,7 +84,7 @@ from the PR head; use the publication run's SHA and receipt.
 | Manual `workflow_dispatch` on `main`, `publish=true` | Explicitly request build/check/publication; requires Actions write access |
 | Manual run on another branch, even with `publish=true`, or a fork | Read-only checks; publication is blocked |
 
-After merge, a maintainer can use **Actions → RunPod Docker build and offline
+A maintainer can use **Actions → RunPod Docker build and offline
 checks → Run workflow**, select `main`, and enable `publish` to retry a failed
 publication. There is no arbitrary source-ref input, tag/release publishing,
 `pull_request_target` or `workflow_run` publishing path. Protect `main` with the
@@ -92,7 +108,7 @@ A successful publication produces:
   `image.json` (source SHA, image ID, tag, digest and run URL) and publication logs.
   Download the receipt for long-term retention; the artifact expires after 90 days.
 
-Copy the **actual complete line from `runpod-image.txt`** into the RunPod custom
+When updating the pinned image, copy the **actual complete line from `runpod-image.txt`** into the RunPod custom
 Pod template's **Container Image** field. The angle-bracket values above are
 placeholders, not published images. Do not use an offline build's local image ID
 as a registry digest. The workflow publishes no `latest` tag. SHA tags identify
@@ -153,6 +169,7 @@ disk, and an 80 GB volume at `/workspace`. Set these environment variables:
 
 | Setting | Value |
 |---|---|
+| `RUNPOD_PYTHON` | `/opt/venv/bin/python` (already set by the image; keep this value) |
 | `RUN_SUITE` | `smoke` initially; `all` runs smoke then performance only on success |
 | `HF_HOME` | `/workspace/hf-cache` |
 | `RESULTS_ROOT` | `/workspace/results` |
@@ -161,7 +178,8 @@ disk, and an 80 GB volume at `/workspace`. Set these environment variables:
 
 Keep the image's entrypoint/CMD, or use the start command
 `bash /opt/muon/runpod/container-start.sh`. Each container start creates a new
-result directory. There is no SSH/Jupyter server in this batch image; view Pod logs
+result directory under `/workspace/results/muon-<UTC timestamp>-<random suffix>/`,
+with `smoke/` and/or `performance/` subdirectories. There is no SSH/Jupyter server in this batch image; view Pod logs
 and retrieve artifacts from the mounted storage. `RUN_SUITE=performance` is also
 available for subsequent repeats after a successful smoke run.
 
