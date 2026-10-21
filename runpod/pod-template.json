@@ -1,7 +1,7 @@
 {
   "description": "RunPod Console template field reference; not an API request or an importable RunPod template ID.",
   "name": "PEFT Muon CUDA validation",
-  "container_image": "YOUR_REGISTRY/peft-muon:cu128",
+  "container_image": "ghcr.io/jasonjiang8866/peft-fine-tuning-recipes-classification@sha256:631a1ae62d4592324aaab894c8e0887c375830463443f150e15582269c1af71a",
   "container_start_command": "bash /opt/muon/runpod/container-start.sh",
   "container_disk_gb": 30,
   "volume_disk_gb": 80,
@@ -15,5 +15,6 @@
     "RESULTS_ROOT": "/workspace/results",
     "CUDA_VISIBLE_DEVICES": "0"
   },
+  "registry_credentials": "If GHCR is private, select RunPod Registry credentials for ghcr.io before deployment; never store credentials here. See README.md.",
   "runtime_secret": "HF_TOKEN: inject in RunPod; account must have access to meta-llama/Llama-3.2-1B-Instruct"
 }
