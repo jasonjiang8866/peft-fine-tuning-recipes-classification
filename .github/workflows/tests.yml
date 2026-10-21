@@ -9,7 +9,8 @@ permissions:
 
 jobs:
   stdlib:
-    runs-on: ubuntu-latest
+    # Python 3.9 binaries are available on 24.04, but not on 26.04.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
