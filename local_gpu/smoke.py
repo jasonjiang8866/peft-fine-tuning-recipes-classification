@@ -12,6 +12,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.dont_write_bytecode = True
 from runpod.validate import read_config, write_json
 
 
@@ -37,6 +38,10 @@ def plan(args):
         "PYTHONPATH": "", "PYTHONNOUSERSITE": "1",
     })
     env.pop("PYTHONHOME", None)
+    # runpod/run.sh defaults an empty value to GPU 0; do not silently unmask a
+    # device deliberately hidden by a workstation's inherited environment.
+    if not env["CUDA_VISIBLE_DEVICES"].strip():
+        raise ValueError("CUDA_VISIBLE_DEVICES is empty; explicitly select one GPU")
     return {
         "config": str(config), "recipe": recipe, "python": str(python),
         "venv": str(venv), "hf_home": env["HF_HOME"],

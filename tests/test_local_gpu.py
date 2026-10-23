@@ -47,6 +47,13 @@ class LocalGpuTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 2)
             child.assert_not_called()
 
+    def test_empty_gpu_mask_does_not_silently_expose_gpu_zero(self):
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": ""}), patch("local_gpu.smoke.launch") as child:
+            with self.assertRaises(SystemExit) as error:
+                main(["--check-config"])
+            self.assertEqual(error.exception.code, 2)
+            child.assert_not_called()
+
     def settings(self, root):
         return {"config": str(ROOT / "runpod/configs/smoke.json"),
                 "recipe": read_config(ROOT / "runpod/configs/smoke.json"),

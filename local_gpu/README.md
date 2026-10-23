@@ -57,7 +57,8 @@ use `tail -f <printed-path>/console.log` and later `suite/adamw-42.log` or
 
 CLI options take precedence over environment variables. Relative overrides are
 relative to the invoking working directory; default repository paths work from
-any directory. Paths with spaces are supported. The GPU executable is invoked
+any directory. An explicitly empty GPU visibility mask is rejected rather than
+silently selecting GPU 0. Paths with spaces are supported. The GPU executable is invoked
 through its venv path, preserving venv symlinks. The launcher clears inherited
 `PYTHONHOME`/`PYTHONPATH` and disables user site packages in the GPU child.
 Set cache variables **before login and execution**. If you already set

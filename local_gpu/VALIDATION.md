@@ -6,7 +6,7 @@ user's RTX 5090 workstation**.
 
 | Check | Observed result |
 |---|---|
-| `python3 -S -m unittest discover -s tests -v` | 37 tests: 35 passed, 2 skipped |
+| `python3 -S -m unittest discover -s tests -v` | 38 tests: 36 passed, 2 skipped |
 | Skipped optional tests | Real CPU PyTorch optimizer and Trainer/PEFT integration; dependencies absent |
 | `py_compile` on benchmark, training, shared validator and local launcher | Passed |
 | `bash -n` on RunPod bootstrap/run/container-start and local bootstrap | Passed |
