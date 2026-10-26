@@ -23,9 +23,9 @@ jobs:
       - name: Dependency-free regressions (site packages disabled)
         run: python -S -m unittest discover -s tests -v
       - name: Compile training entry points
-        run: python -m py_compile benchmark_muon.py training.py runpod/validate.py
+        run: python -m py_compile benchmark_muon.py training.py runpod/validate.py local_gpu/smoke.py
       - name: Validate RunPod shell scripts
-        run: bash -n runpod/bootstrap.sh runpod/run.sh runpod/container-start.sh
+        run: bash -n runpod/bootstrap.sh runpod/run.sh runpod/container-start.sh local_gpu/bootstrap.sh
 
   optimizer-cpu:
     runs-on: ubuntu-latest
