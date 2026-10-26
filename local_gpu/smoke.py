@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -51,6 +52,106 @@ def plan(args):
     }, env
 
 
+def validate_evidence(suite, recipe):
+    """Check the shared suite's evidence contract without importing torch/loading tensors."""
+    def require(condition, path, detail):
+        if not condition:
+            raise ValueError(f"Incomplete GPU evidence: {path}: {detail}")
+
+    def nonempty(path):
+        require(path.is_file() and path.stat().st_size > 0, path, "missing or empty file")
+
+    def reject_constant(value):
+        raise ValueError(f"nonfinite JSON value {value}")
+
+    def read(path):
+        nonempty(path)
+        try:
+            value = json.loads(path.read_text(), parse_constant=reject_constant)
+        except (ValueError, UnicodeError) as error:
+            raise ValueError(f"Incomplete GPU evidence: {path}: invalid JSON: {error}") from error
+        require(isinstance(value, dict), path, "expected JSON object")
+        return value
+
+    def number(value):
+        return type(value) in (int, float) and math.isfinite(value)
+
+    def same_path(value, expected):
+        return isinstance(value, str) and Path(value).is_absolute() and Path(value).resolve() == expected.resolve()
+
+    config_path = suite / "resolved-config.json"
+    resolved = read(config_path)
+    # prepare_data resolves revisions and regenerates data metadata for this run.
+    generated = {"model_revision", "dataset_revision", "data_root", "data_fingerprints", "data_sha256"}
+    require(all(resolved.get(k) == v for k, v in recipe.items() if k not in generated),
+            config_path, "does not match input smoke config")
+    require(all(isinstance(resolved.get(k), str) and resolved[k]
+                for k in ("model_revision", "dataset_revision")) and
+            same_path(resolved.get("data_root"), suite), config_path, "missing resolved revisions/data root")
+    summary_path = suite / "summary.json"
+    summary = read(summary_path)
+    for name in ("summary.md", "summary.csv"):
+        nonempty(suite / name)
+    records = summary.get("runs")
+    require(summary.get("status") == "passed" and isinstance(records, list),
+            summary_path, "missing passed summary/runs")
+    expected = {(mode, seed) for mode in ("adamw", "muon") for seed in recipe["seeds"]}
+    seen = set()
+    for row in records:
+        require(isinstance(row, dict) and isinstance(row.get("mode"), str) and
+                type(row.get("seed")) is int, summary_path, "invalid run identity")
+        key = (row["mode"], row["seed"])
+        require(key in expected and key not in seen, summary_path, f"unexpected/duplicate run {key}")
+        seen.add(key)
+    require(seen == expected, summary_path, f"missing runs: {sorted(expected - seen)}")
+    for row in records:
+        mode, seed = row["mode"], row["seed"]
+        original = suite / f"{mode}-{seed}"
+        checkpoint = original / "checkpoints" / f"checkpoint-{recipe['checkpoint_step']}"
+        require(same_path(row.get("path"), original) and row.get("performance_eligible") is False,
+                summary_path, f"invalid smoke path/eligibility for {mode}-{seed}")
+        state_path = checkpoint / "trainer_state.json"
+        require(read(state_path).get("global_step") == recipe["checkpoint_step"],
+                state_path, "wrong checkpoint step")
+        for name in ("optimizer.pt", "scheduler.pt"):
+            nonempty(checkpoint / name)
+        for resumed in (False, True):
+            run = suite / f"{mode}-{seed}{'-resumed' if resumed else ''}"
+            path = run / "result.json"
+            report = read(path)
+            require(report.get("status") == "passed" and report.get("mode") == mode and
+                    type(report.get("seed")) is int and report["seed"] == seed and
+                    report.get("config") == resolved and
+                    report.get("global_steps") == recipe["max_steps"] and
+                    report.get("start_step") == (recipe["checkpoint_step"] if resumed else 0) and
+                    "resumed_from" in report and
+                    (same_path(report["resumed_from"], checkpoint) if resumed else report["resumed_from"] is None) and
+                    report.get("performance_eligible") is False, path, "run identity/config/steps/resume mismatch")
+            try:
+                metrics = {"mean_step_ms": report["timing"]["mean_ms"],
+                           "examples_per_second": report["timing"]["examples_per_second"],
+                           "accuracy": report["test"]["eval_accuracy"], "f1": report["test"]["eval_f1"],
+                           "train_peak_mib": report["peak_cuda"]["train"]["allocated_mib"]}
+                values = [*metrics.values(), report["train_loss"], report["test"]["eval_loss"]]
+            except (KeyError, TypeError) as error:
+                raise ValueError(f"Incomplete GPU evidence: {path}: missing metrics") from error
+            require(all(number(v) for v in values), path, "nonfinite/invalid metrics")
+            if not resumed:
+                require(all(number(row.get(k)) and row[k] == v for k, v in metrics.items()),
+                        summary_path, f"metrics differ from {path}")
+            for name in ("final-trainables.pt", "final-state.pt"):
+                nonempty(run / name)
+            if resumed:
+                comparison_path = run / "resume-comparison.json"
+                comparison = read(comparison_path)
+                require(comparison.get("status") == "passed" and comparison.get("errors") == [] and
+                        comparison.get("atol") == recipe["resume_atol"] and
+                        comparison.get("rtol") == recipe["resume_rtol"] and
+                        number(comparison.get("max_abs_tensor_difference")) and
+                        comparison["max_abs_tensor_difference"] >= 0,
+                        comparison_path, "missing successful comparison with configured tolerances")
+
+
 def launch(settings, env):
     if settings["output"]:
         output = Path(settings["output"])
@@ -89,6 +190,7 @@ def launch(settings, env):
         if code or evidence.get("status") != "passed":
             raise RuntimeError(evidence.get("error") or
                                f"GPU suite did not pass (exit {code}); see console.log and suite/*.log")
+        validate_evidence(output / "suite", settings["recipe"])
         status.update(status="passed", gpu_validation_passed=True)
     except (Exception, KeyboardInterrupt) as error:
         code = code or 1

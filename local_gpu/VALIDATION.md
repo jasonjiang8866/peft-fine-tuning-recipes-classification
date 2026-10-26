@@ -1,5 +1,35 @@
 # Local launcher validation — 2026-10-23
 
+## Result integrity follow-up — 2026-10-26
+
+Independently checked PR #9 at `6af1d5c164c6f013c3273c78f6517a79ec34cfbe`.
+The old launcher accepted a zero-exit child with only `status=passed`. Before
+the fix, all 11 missing-artifact subcases incorrectly returned success (missing
+summaries, original/resumed results, resume comparison, final state/weights and
+checkpoint evidence). This reproduces a launcher false-positive path, not an
+observed CUDA training failure or a fault in the normal shared suite ordering.
+
+The local launcher now validates the actual smoke configuration against complete
+per-seed AdamW/Muon results and summary records, including both resumed reports,
+checkpoint steps/state artifacts and successful comparisons at the configured
+tolerances. It fails closed without loading tensor files or changing RunPod code.
+CPU fixtures use synthetic tensor placeholders and the real stdlib summarizer;
+they are not GPU validation evidence.
+
+- `python3 -S -m unittest discover -s tests -v`: 42 tests, 40 passed and 2
+  optional CPU ML integration tests skipped because dependencies are absent.
+- Regressions cover 11 missing-artifact cases, 39 inconsistent/malformed-artifact
+  cases, status-only success, and custom seeds `[9, 17]` with an 8-step/step-4
+  checkpoint configuration (including a missing second-seed arm/resume).
+- Compile checks, Bash syntax checks and `git diff --check` passed.
+- GitHub Actions results belong to the updated PR commit; CPU/offline success
+  does not establish RTX 5090 or CUDA training success.
+
+No paid GPU or real GPU training was launched. The workstation validation below
+remains outstanding.
+
+## Original implementation checks
+
 Base: merged `main` commit `2499429ca7d6664e72eeb93756a43a563ac1ebef`
 (PR #8). These observations describe the implementation environment, **not the
 user's RTX 5090 workstation**.

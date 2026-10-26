@@ -1,5 +1,7 @@
 """Offline launcher/configuration coverage, not CUDA training evidence."""
 import json
+import copy
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -9,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from local_gpu.smoke import ROOT, launch, main
-from runpod.validate import read_config, write_json
+from runpod.validate import read_config, summarize, write_json
 
 
 class LocalGpuTests(unittest.TestCase):
@@ -61,6 +63,158 @@ class LocalGpuTests(unittest.TestCase):
                 "hf_home": str(root / "cache"), "cuda_visible_devices": "0",
                 "output_root": str(root / "results"), "output": str(root / "result")}
 
+    def suite_evidence(self, output, recipe):
+        """Synthetic reports only; tensor placeholders are never loaded as GPU evidence."""
+        suite = output / "suite"
+        config = {**recipe, "model_revision": "resolved-model-sha",
+                  "dataset_revision": "resolved-data-sha", "data_root": str(suite.resolve())}
+        write_json(suite / "resolved-config.json", config)
+        records = []
+        for seed in recipe["seeds"]:
+            for mode in ("adamw", "muon"):
+                original = suite / f"{mode}-{seed}"
+                checkpoint = original / "checkpoints" / f"checkpoint-{recipe['checkpoint_step']}"
+                write_json(checkpoint / "trainer_state.json", {"global_step": recipe["checkpoint_step"]})
+                for name in ("optimizer.pt", "scheduler.pt"):
+                    (checkpoint / name).write_bytes(b"synthetic placeholder")
+                for resumed in (False, True):
+                    run = suite / f"{mode}-{seed}{'-resumed' if resumed else ''}"
+                    report = {"status": "passed", "mode": mode, "seed": seed, "config": config,
+                              "global_steps": recipe["max_steps"],
+                              "start_step": recipe["checkpoint_step"] if resumed else 0,
+                              "resumed_from": str(checkpoint) if resumed else None,
+                              "performance_eligible": False, "train_loss": 0.9,
+                              "timing": {"mean_ms": 10.0, "examples_per_second": 400.0},
+                              "test": {"eval_loss": 0.8, "eval_accuracy": 0.5, "eval_f1": 0.4},
+                              "peak_cuda": {"train": {"allocated_mib": 1000.0}}}
+                    write_json(run / "result.json", report)
+                    for name in ("final-trainables.pt", "final-state.pt"):
+                        (run / name).write_bytes(b"synthetic placeholder")
+                    if resumed:
+                        write_json(run / "resume-comparison.json", {
+                            "status": "passed", "errors": [], "max_abs_tensor_difference": 0.0,
+                            "atol": recipe["resume_atol"], "rtol": recipe["resume_rtol"]})
+                records.append({"mode": mode, "seed": seed, "path": str(original),
+                                "mean_step_ms": 10.0, "examples_per_second": 400.0,
+                                "accuracy": 0.5, "f1": 0.4, "train_peak_mib": 1000.0,
+                                "performance_eligible": False})
+        # Use the real stdlib summarizer to keep the fixture aligned with the producer.
+        summarize(suite, records)
+        write_json(suite / "status.json", {"status": "passed"})
+
+    def test_passed_status_requires_complete_evidence(self):
+        for missing in ("summary.json", "summary.md", "summary.csv", "adamw-42/result.json",
+                        "muon-42/result.json", "muon-42-resumed/result.json",
+                        "muon-42-resumed/resume-comparison.json",
+                        "adamw-42/final-trainables.pt", "muon-42-resumed/final-state.pt",
+                        "adamw-42/checkpoints/checkpoint-6/optimizer.pt",
+                        "adamw-42/checkpoints/checkpoint-6/trainer_state.json"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                settings = self.settings(Path(tmp))
+                output = Path(settings["output"])
+
+                def child(command, **kwargs):
+                    self.suite_evidence(output, settings["recipe"])
+                    (output / "suite" / missing).unlink()
+                    return subprocess.CompletedProcess(command, 0)
+
+                with patch("local_gpu.smoke.subprocess.run", side_effect=child), \
+                        patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    self.assertEqual(launch(settings, {}), 1)
+                status = json.loads((output / "launcher-status.json").read_text())
+                self.assertFalse(status["gpu_validation_passed"])
+                self.assertEqual(status["status"], "failed")
+                self.assertIn(missing, status["error"])
+                self.assertNotIn("GPU smoke passed", stdout.getvalue())
+
+    def test_passed_status_rejects_inconsistent_or_malformed_evidence(self):
+        cases = [
+            ("summary.json", lambda d: d.update(status="failed")),
+            ("summary.json", lambda d: d["runs"].pop()),
+            ("summary.json", lambda d: d["runs"].append(copy.deepcopy(d["runs"][0]))),
+            ("summary.json", lambda d: d["runs"][0].update(seed=99)),
+            ("summary.json", lambda d: d["runs"][0].update(path="/stale/adamw-42")),
+            ("summary.json", lambda d: d["runs"][0].update(f1=0.99)),
+            ("summary.json", lambda d: d["runs"][0].pop("accuracy")),
+            ("summary.json", lambda d: d.update(runs={})),
+            ("resolved-config.json", lambda d: d.update(max_steps=24)),
+            ("muon-42/result.json", lambda d: d.update(status="failed")),
+            ("muon-42/result.json", lambda d: d.update(mode="adamw")),
+            ("muon-42/result.json", lambda d: d.update(seed=7)),
+            ("muon-42/result.json", lambda d: d.update(global_steps=6)),
+            ("muon-42/result.json", lambda d: d["config"].update(batch_size=8)),
+            ("muon-42/result.json", lambda d: d.pop("timing")),
+            ("muon-42/result.json", lambda d: d["test"].update(eval_f1=None)),
+            ("muon-42-resumed/result.json", lambda d: d.update(start_step=0)),
+            ("muon-42-resumed/result.json", lambda d: d.update(resumed_from=None)),
+            ("muon-42-resumed/result.json", lambda d: d.update(performance_eligible=True)),
+            ("muon-42-resumed/resume-comparison.json", lambda d: d.update(status="failed")),
+            ("muon-42-resumed/resume-comparison.json", lambda d: d.update(errors=["tensor differs"])),
+            ("muon-42-resumed/resume-comparison.json", lambda d: d.pop("errors")),
+            ("muon-42-resumed/resume-comparison.json", lambda d: d.update(atol=1.0)),
+            ("muon-42-resumed/resume-comparison.json", lambda d: d.update(rtol=1.0)),
+            ("muon-42-resumed/resume-comparison.json", lambda d: d.pop("max_abs_tensor_difference")),
+            ("muon-42-resumed/resume-comparison.json", lambda d: d.update(max_abs_tensor_difference=-1)),
+            ("adamw-42/checkpoints/checkpoint-6/trainer_state.json", lambda d: d.update(global_step=0)),
+        ]
+        cases += [(path, raw) for path in ("summary.json", "muon-42/result.json",
+                                          "muon-42-resumed/resume-comparison.json")
+                  for raw in ("", "{", "[]", '{"status": "passed", "value": NaN}')]
+        for index, (path, mutation) in enumerate(cases):
+            with self.subTest(case=index, path=path), tempfile.TemporaryDirectory() as tmp:
+                settings = self.settings(Path(tmp))
+                output = Path(settings["output"])
+
+                def child(command, **kwargs):
+                    self.suite_evidence(output, settings["recipe"])
+                    target = output / "suite" / path
+                    if isinstance(mutation, str):
+                        target.write_text(mutation)
+                    else:
+                        data = json.loads(target.read_text())
+                        mutation(data)
+                        write_json(target, data)
+                    return subprocess.CompletedProcess(command, 0)
+
+                with patch("local_gpu.smoke.subprocess.run", side_effect=child), \
+                        patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    self.assertEqual(launch(settings, {}), 1)
+                status = json.loads((output / "launcher-status.json").read_text())
+                self.assertFalse(status["gpu_validation_passed"])
+                self.assertIn(path, status["error"])
+                self.assertNotIn("GPU smoke passed", stdout.getvalue())
+
+    def test_custom_seeds_and_checkpoint_steps_require_every_arm_and_resume(self):
+        for missing in (None, "muon-17/result.json", "adamw-9-resumed/resume-comparison.json"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                settings = self.settings(Path(tmp))
+                settings["recipe"].update(seeds=[9, 17], max_steps=8, checkpoint_step=4)
+                output = Path(settings["output"])
+
+                def child(command, **kwargs):
+                    self.suite_evidence(output, settings["recipe"])
+                    if missing:
+                        (output / "suite" / missing).unlink()
+                    return subprocess.CompletedProcess(command, 0)
+
+                with patch("local_gpu.smoke.subprocess.run", side_effect=child):
+                    self.assertEqual(launch(settings, {}), 1 if missing else 0)
+                status = json.loads((output / "launcher-status.json").read_text())
+                self.assertEqual(status["gpu_validation_passed"], missing is None)
+
+    def test_status_only_pass_is_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self.settings(Path(tmp))
+            output = Path(settings["output"])
+
+            def child(command, **kwargs):
+                write_json(output / "suite/status.json", {"status": "passed"})
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch("local_gpu.smoke.subprocess.run", side_effect=child):
+                self.assertEqual(launch(settings, {}), 1)
+            self.assertFalse(json.loads((output / "launcher-status.json").read_text())["gpu_validation_passed"])
+
     def test_delegates_to_existing_suite_and_preserves_failure(self):
         for fail in (False, True):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as tmp:
@@ -75,6 +229,8 @@ class LocalGpuTests(unittest.TestCase):
                     self.assertEqual(json.loads(Path(command[3]).read_text()), settings["recipe"])
                     self.assertEqual(kwargs["env"], env)
                     kwargs["stdout"].write("diagnostic from child\n")
+                    if not fail:
+                        self.suite_evidence(output, settings["recipe"])
                     write_json(output / "suite/status.json", {
                         "status": "failed" if fail else "passed", "error": "CUDA OOM" if fail else None})
                     return subprocess.CompletedProcess(command, 7 if fail else 0)

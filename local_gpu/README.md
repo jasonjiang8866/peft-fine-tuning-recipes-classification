@@ -29,7 +29,7 @@ bash local_gpu/bootstrap.sh
 # Interactive login uses the same HF_HOME/cache as the later smoke run.
 .venv-local-gpu/bin/hf auth login
 
-# Real CUDA smoke. Return code 0 requires the shared suite to report passed.
+# Real CUDA smoke. Return code 0 also requires complete, consistent suite evidence.
 python3 local_gpu/smoke.py
 ```
 
@@ -92,6 +92,22 @@ suite retains single-GPU/process preflight, native bf16 matmul, native Muon,
 actual int8 bitsandbytes weights, no CPU/disk offload, observed bf16 autocast,
 finite gradients/weights/loss, and checkpoint parameter/optimizer/scheduler/LR
 comparisons. The local launcher rejects configs with resume disabled.
+
+After a zero child exit and `status=passed`, the launcher independently checks
+the resolved config, nonempty summary JSON/Markdown/CSV and exactly one summary
+record per configured seed and optimizer. Each AdamW/Muon original and resumed
+report must match the config, identity, total/start steps and checkpoint path;
+finite metrics must be present and original metrics must match the summary.
+The configured checkpoint's Trainer step, optimizer/scheduler files, both runs'
+final tensor/state files and a passed resume comparison with no errors and the
+configured tolerances are required. Missing, empty, malformed or inconsistent
+evidence produces a nonzero exit and `gpu_validation_passed: false`, with the
+offending path in `launcher-status.json`. No success message is printed.
+
+This is an artifact completeness/consistency check. It does not deserialize
+tensor files or repeat the numerical comparison; the shared GPU suite performs
+that comparison. Nonempty files and synthetic CPU fixtures alone cannot prove
+CUDA training or RTX 5090 compatibility.
 
 Each new run contains:
 
