@@ -199,6 +199,15 @@ def worker(c, output, mode, seed, resume=None):
     before = {n: p.detach().cpu().clone() for n, p in model.named_parameters()
               if p.requires_grad} if smoke else {}
     load_peak = torch.cuda.max_memory_allocated() / 2**20
+    trace_resume = smoke and c["model"] == "Qwen/Qwen3.5-0.8B"
+    if trace_resume:
+        # Keep convolution and attention backward reproducible for restart checks.
+        # Global deterministic mode can reject the DeltaNet CUDA floating-point cumsum.
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
     args = TrainingArguments(
         output_dir=str(output / "checkpoints"), max_steps=c["max_steps"],
         learning_rate=c["learning_rate"], weight_decay=c["weight_decay"],
@@ -263,6 +272,12 @@ def worker(c, output, mode, seed, resume=None):
                            torch.get_autocast_dtype("cuda") == torch.bfloat16)
     hook = quantized[0].register_forward_pre_hook(probe)
     kwargs["callbacks"].append(audit)
+    if trace_resume:
+        from runpod.qwen.resume_trace import ResumeTrace
+        trace = ResumeTrace(c["checkpoint_step"])
+        model.register_forward_pre_hook(trace.before_forward, with_kwargs=True)
+        model.register_forward_hook(trace.after_forward)
+        kwargs["callbacks"].append(trace)
     def metrics(pred):
         labels = pred.label_ids
         predicted = np.argmax(pred.predictions, axis=1)
@@ -326,6 +341,10 @@ def worker(c, output, mode, seed, resume=None):
         "peak_cuda": {"load_allocated_mib": load_peak, "train": train_peak,
                       "eval_allocated_mib": torch.cuda.max_memory_allocated() / 2**20},
         "performance_eligible": not smoke and not resume}
+    if trace_resume:
+        report["resume_trace"] = trace.rows
+        report["smoke_kernels"] = {"cudnn_deterministic": torch.backends.cudnn.deterministic,
+                                   "attention": "math_sdpa"}
     write_json(output / "result.json", report)
 
 
@@ -366,6 +385,9 @@ def compare_resume(original, resumed, c):
     result = {"status": "failed" if errors else "passed", "errors": errors,
               "max_abs_tensor_difference": max_difference,
               "atol": c["resume_atol"], "rtol": c["resume_rtol"]}
+    if "resume_trace" in a or "resume_trace" in b:
+        from runpod.qwen.resume_trace import first_difference
+        result["first_trace_difference"] = first_difference(a.get("resume_trace", []), b.get("resume_trace", []))
     write_json(resumed / "resume-comparison.json", result)
     if errors:
         raise RuntimeError("Resume diverged; see resume-comparison.json (do not hide by loosening tolerances)")
