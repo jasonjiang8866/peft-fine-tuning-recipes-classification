@@ -1,0 +1,45 @@
+name: Qwen3.5 AdamW and Muon GPU comparison
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_paid:
+        type: boolean
+        description: One new allocation within the USD 5 total experiment budget
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: qwen35-paid-gpu
+  cancel-in-progress: false
+jobs:
+  benchmark:
+    if: github.repository == 'jasonjiang8866/peft-fine-tuning-recipes-classification' && github.ref == 'refs/heads/main' && inputs.confirm_paid
+    runs-on: ubuntu-24.04
+    timeout-minutes: 135
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify anonymous image access and Qwen dependency resolution
+        timeout-minutes: 15
+        run: |
+          image=$(jq -er .container_image runpod/pod-template.json)
+          docker pull "$image"
+          docker run --rm -v "$PWD/runpod/qwen:/qwen:ro" "$image" /opt/venv/bin/python -m pip install --dry-run -r /qwen/requirements.txt
+      - name: Compare optimizers on one Pod
+        timeout-minutes: 109
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: python runpod/qwen/controller.py run
+      - name: Delete owned Pod and verify absence
+        if: always() && hashFiles('qwen-evidence/allocation.json') != ''
+        timeout-minutes: 5
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: python runpod/qwen/controller.py cleanup
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-optimizer-evidence
+          path: qwen-evidence/
+          retention-days: 30

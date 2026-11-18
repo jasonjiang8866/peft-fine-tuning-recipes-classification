@@ -1,0 +1,148 @@
+"""One manual allocation for the USD 5 Qwen optimizer comparison."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import sys
+import time
+from urllib.parse import quote
+
+from provider import REPOSITORY, Runpod, budget, finite, identity, request
+
+OUT = Path("qwen-evidence")
+IMAGE = json.loads(Path("runpod/pod-template.json").read_text())["container_image"]
+GPUS = ["NVIDIA GeForce RTX " + model for model in ("4090", "3090", "5090")]
+RATE_CAP = 2.0  # <= $4 for 2 h inclusive of cleanup, $1 reserve for extras.
+OWNER = "qwen35-" + os.environ.get("GITHUB_RUN_ID", "")
+
+
+def save(name, data):
+    OUT.mkdir(exist_ok=True)
+    p = OUT / name
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, allow_nan=False))
+    tmp.replace(p)
+
+
+def select(api):
+    for gpu in GPUS:
+        catalog = api.call("/catalog/gpus/" + quote(gpu, safe="") +
+                           "?include=AVAILABILITY&product=POD&cloud=SECURE&count=1&minCudaVersion=12.8")
+        rate = catalog.get("price", {}).get("secure")
+        regions = [r["id"] for r in catalog.get("dataCenters", [])
+                   if r.get("availability") in {"LOW", "MEDIUM", "HIGH"}]
+        if finite(rate, .001) and rate <= RATE_CAP and regions:
+            return gpu, rate, regions
+    raise RuntimeError("No approved card at or below $2/hour")
+
+
+def cleanup(api):
+    path = OUT / "allocation.json"
+    if not path.exists():
+        return
+    state = json.loads(path.read_text())
+    seen = False
+    for check in range(12):
+        pods = [p for p in api.listing("/pods", "pods") if p["name"] == OWNER]
+        if not pods and (seen or state.get("pod_id") or check >= 8):
+            save("cleanup.json", {"absent": True, "name": OWNER, "ended": time.time(),
+                                  "estimated_gpu_usd": (time.time()-state["started"])*state["rate"]/3600})
+            return
+        for p in pods:
+            if (len(pods) != 1 or p.get("env", {}).get("BENCH_OWNER") != REPOSITORY
+                    or p["env"].get("BENCH_RUN") != OWNER or p.get("image") != IMAGE
+                    or (state.get("pod_id") and p["id"] != state["pod_id"])
+                    or not re.fullmatch("[A-Za-z0-9_-]+", p["id"])):
+                raise RuntimeError("Pod ownership mismatch")
+            if not seen:
+                api.call("/pods/" + p["id"], "DELETE")
+                seen = True
+        time.sleep(5)
+    raise RuntimeError("Pod absence unverified")
+
+
+def verify(result, sha, pod):
+    if result["commit"] != sha or result["pod"] != pod:
+        raise ValueError("Worker provenance mismatch")
+    files = result["files"]
+    for item in files.values():
+        if hashlib.sha256(item["text"].encode()).hexdigest() != item["sha256"]:
+            raise ValueError("Result checksum mismatch")
+    def read(key):
+        return json.loads(files[key]["text"])
+    for stage in ("smoke", "performance"):
+        cfg = json.loads(Path(f"runpod/qwen/{stage}.json").read_text())
+        if read(f"{stage}/status.json")["status"] != "passed":
+            raise ValueError("Incomplete suite")
+        for seed in cfg["seeds"]:
+            for mode in ("adamw", "muon"):
+                prefix = f"{stage}/{mode}-{seed}"
+                row = read(prefix + "/result.json")
+                if (row["mode"] != mode or row["seed"] != seed or row["status"] != "passed"
+                        or any(cfg[k] != row["config"][k] for k in cfg)
+                        or row["global_steps"] != cfg["max_steps"]
+                        or not row["integration"]["bf16_autocast_observed"]
+                        or row["integration"]["int8_linear_layers"] < 1
+                        or row["timing"]["timed_steps"] != cfg["max_steps"] - cfg["skip_steps"]):
+                    raise ValueError("Incomplete training evidence: " + prefix)
+                if stage == "smoke" and read(prefix + "-resumed/resume-comparison.json")["status"] != "passed":
+                    raise ValueError("Resume comparison failed")
+
+
+def run(api):
+    if os.environ["GITHUB_RUN_ATTEMPT"] != "1":
+        raise RuntimeError("Reconcile prior spend before retrying")
+    sha = os.environ["GITHUB_SHA"]
+    if not re.fullmatch("[0-9a-f]{40}", sha) or os.environ["GITHUB_REF"] != "refs/heads/main":
+        raise ValueError("Expected reviewed main source")
+    if any(p.get("env", {}).get("BENCH_OWNER") == REPOSITORY for p in api.listing("/pods","pods")):
+        raise RuntimeError("An owned Pod already exists")
+    gpu, rate, regions = select(api)
+    save("budget.json", budget(api, reserve=5))
+    state = dict(started=time.time(), gpu=gpu, rate=rate, regions=regions, image=IMAGE, sha=sha)
+    save("allocation.json", state)
+    token = secrets.token_urlsafe(32)
+    command = (f"git init -q /tmp/qwen && cd /tmp/qwen && git fetch -q --depth 1 "
+               f"https://github.com/{REPOSITORY}.git {sha} && git checkout -q FETCH_HEAD && "
+               f"test \"$(git rev-parse HEAD)\" = {sha} && exec /opt/venv/bin/python runpod/qwen/worker.py")
+    body = dict(name=OWNER, image=IMAGE, cloud="SECURE", disk=45, startSsh=False,
+                ports=["8888/http"], gpu=dict(id=gpu,count=1,minCudaVersion="12.8"),
+                dataCenterIds=regions, entrypoint=["/bin/bash","-lc"], cmd=[command],
+                env=dict(BENCH_OWNER=REPOSITORY, BENCH_RUN=OWNER, RESULT_TOKEN=token,
+                         RUNPOD_PYTHON="/opt/venv/bin/python", MUON_SOURCE_COMMIT=sha))
+    pod = api.call("/pods", "POST", body)["id"]
+    if not re.fullmatch("[A-Za-z0-9_-]+", pod):
+        raise ValueError("Invalid Pod identity")
+    state.update(pod_id=pod)
+    save("allocation.json", state)
+    detail = api.call("/pods/" + pod)
+    if detail.get("gpu", {}).get("id") != gpu or not finite(detail.get("cost"), .001) or detail["cost"] > RATE_CAP:
+        raise RuntimeError("Allocated GPU or rate outside approved bounds")
+    state.update(rate=detail["cost"], region=detail["dataCenterId"])
+    save("allocation.json", state)
+    while time.time() < state["started"] + 105*60:
+        try:
+            result = request(f"https://{pod}-8888.proxy.runpod.net/result", token=token, limit=20_000_000)
+        except RuntimeError:
+            time.sleep(15)
+            continue
+        if "files" in result:
+            save("worker.json", result)
+        if result["status"] == "passed":
+            verify(result, sha, pod)
+            return
+        if result["status"] == "failed":
+            raise RuntimeError("Worker failed; inspect worker.json")
+        time.sleep(15)
+    raise TimeoutError("105-minute allocation window elapsed")
+
+
+if __name__ == "__main__":
+    identity()
+    api = Runpod()
+    if sys.argv[1] == "cleanup":
+        cleanup(api)
+    elif sys.argv[1] == "run":
+        run(api)

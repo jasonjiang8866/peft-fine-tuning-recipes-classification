@@ -116,7 +116,8 @@ def prepare_data(c, output):
     c["model_revision"] = api.model_info(c["model"], revision=c["model_revision"]).sha
     c["dataset_revision"] = api.dataset_info(c["dataset"], revision=c["dataset_revision"]).sha
     tok = AutoTokenizer.from_pretrained(c["model"], revision=c["model_revision"])
-    tok.pad_token = tok.eos_token
+    if c["model"] != "Qwen/Qwen3.5-0.8B" or tok.pad_token is None:
+        tok.pad_token = tok.eos_token
     ds = load_dataset(c["dataset"], revision=c["dataset_revision"])
     # Match training.py split; subset selection is shared across ALL seeds and arms.
     split = ds["train"].train_test_split(test_size=0.1, seed=42, stratify_by_column="label")
@@ -160,10 +161,23 @@ def worker(c, output, mode, seed, resume=None):
     ds = load_from_disk(str(data_root / "data"))
     tok = AutoTokenizer.from_pretrained(str(data_root / "tokenizer"))
     torch.cuda.reset_peak_memory_stats()
+    options = {"num_labels": 4}
+    quantization = BitsAndBytesConfig(load_in_8bit=True)
+    if c["model"] == "Qwen/Qwen3.5-0.8B":
+        from transformers import Qwen3_5TextConfig
+
+        config = Qwen3_5TextConfig.from_pretrained(c["model"], revision=c["model_revision"])
+        config.num_labels = 4
+        options = {"config": config, "output_loading_info": True}
+        quantization = BitsAndBytesConfig(load_in_8bit=True, llm_int8_skip_modules=["score"])
     model = AutoModelForSequenceClassification.from_pretrained(
-        c["model"], revision=c["model_revision"], num_labels=4,
-        quantization_config=BitsAndBytesConfig(load_in_8bit=True),
+        c["model"], revision=c["model_revision"], **options,
+        quantization_config=quantization,
         device_map={"": 0}, torch_dtype=torch.bfloat16, attn_implementation="sdpa")
+    if options.get("output_loading_info"):
+        model, info = model
+        if set(info["missing_keys"]) - {"score.weight"} or info.get("mismatched_keys") or info.get("error_msgs"):
+            raise RuntimeError("Incomplete Qwen text backbone load: " + str(info["missing_keys"]))
     model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
     model = get_peft_model(model, LoraConfig(
         r=16, lora_alpha=32, lora_dropout=0.1, bias="none", task_type="SEQ_CLS",
