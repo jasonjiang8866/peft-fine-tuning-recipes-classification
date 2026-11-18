@@ -23,3 +23,12 @@ Use a new dispatch only after reconciling previous charges against the total.
 Runner interruption can prevent cleanup. Check inventory for the exact
 qwen35-<Actions run ID> and its ownership markers before retrying. Keep the
 worker.json, allocation.json and cleanup.json artifact together.
+
+The first RTX 5090 allocation completed both 12-step AdamW trajectories but
+failed the numerical restart check. The first subsequent logged loss difference
+was at step 8. See [run 44303141495](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/44303141495).
+For the Qwen restart test, use deterministic cuDNN convolution and math SDPA
+and fingerprint steps 7 and 8, including both gradient accumulation microbatches.
+The first differing digest in resume-comparison.json is diagnostic. The original
+tensor tolerances still decide acceptance. The fresh performance processes use
+normal kernel selection and collect no resume fingerprints.
