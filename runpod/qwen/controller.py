@@ -1,6 +1,7 @@
 """One manual allocation for the USD 5 Qwen optimizer comparison."""
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -9,12 +10,15 @@ import sys
 import time
 from urllib.parse import quote
 
+from profiles import profile
 from provider import REPOSITORY, Runpod, budget, finite, identity, request
 
 OUT = Path("qwen-evidence")
 IMAGE = json.loads(Path("runpod/pod-template.json").read_text())["container_image"]
 GPUS = ["NVIDIA GeForce RTX " + model for model in ("4090", "3090", "5090")]
-RATE_CAP = 2.0  # <= $4 for 2 h inclusive of cleanup, $1 reserve for extras.
+RATE_CAP = 2.0
+EXTRAS_USD = 1.0
+CLEANUP_MINUTES = 5
 OWNER = "qwen35-" + os.environ.get("GITHUB_RUN_ID", "")
 
 
@@ -63,7 +67,16 @@ def cleanup(api):
     raise RuntimeError("Pod absence unverified")
 
 
-def verify(result, sha, pod):
+def allocation_minutes(remaining, rate):
+    if not finite(remaining, .01) or remaining > 5 or not finite(rate, .001) or rate > RATE_CAP:
+        raise ValueError("Invalid experiment allowance or hourly rate")
+    minutes = min(105, math.floor((remaining - EXTRAS_USD) * 60 / rate) - CLEANUP_MINUTES)
+    if minutes < 1:
+        raise ValueError("Remaining allowance cannot fund allocation and cleanup")
+    return minutes
+
+
+def verify(result, sha, pod, scope="all"):
     if result["commit"] != sha or result["pod"] != pod:
         raise ValueError("Worker provenance mismatch")
     files = result["files"]
@@ -73,9 +86,12 @@ def verify(result, sha, pod):
     def read(key):
         return json.loads(files[key]["text"])
     for stage in ("smoke", "performance"):
-        cfg = json.loads(Path(f"runpod/qwen/{stage}.json").read_text())
+        cfg = profile(stage, scope)
         if read(f"{stage}/status.json")["status"] != "passed":
             raise ValueError("Incomplete suite")
+        expected_hashes = read(f"{stage}/resolved-config.json")["data_sha256"]
+        if not all(re.fullmatch("[0-9a-f]{64}", expected_hashes[key]) for key in ("train", "test")):
+            raise ValueError("Missing dataset hash")
         for seed in cfg["seeds"]:
             for mode in ("adamw", "muon"):
                 prefix = f"{stage}/{mode}-{seed}"
@@ -83,6 +99,8 @@ def verify(result, sha, pod):
                 if (row["mode"] != mode or row["seed"] != seed or row["status"] != "passed"
                         or any(cfg[k] != row["config"][k] for k in cfg)
                         or row["global_steps"] != cfg["max_steps"]
+                        or row["config"]["data_sha256"] != expected_hashes
+                        or row["performance_eligible"] != (stage == "performance")
                         or not row["integration"]["bf16_autocast_observed"]
                         or row["integration"]["int8_linear_layers"] < 1
                         or row["timing"]["timed_steps"] != cfg["max_steps"] - cfg["skip_steps"]):
@@ -99,9 +117,14 @@ def run(api):
         raise ValueError("Expected reviewed main source")
     if any(p.get("env", {}).get("BENCH_OWNER") == REPOSITORY for p in api.listing("/pods","pods")):
         raise RuntimeError("An owned Pod already exists")
+    scope = os.environ.get("QWEN_SCOPE", "all")
+    profile("performance", scope)
+    remaining = float(os.environ["QWEN_REMAINING_USD"])
     gpu, rate, regions = select(api)
-    save("budget.json", budget(api, reserve=5))
-    state = dict(started=time.time(), gpu=gpu, rate=rate, regions=regions, image=IMAGE, sha=sha)
+    minutes = allocation_minutes(remaining, rate)
+    save("budget.json", budget(api, reserve=remaining))
+    state = dict(started=time.time(), gpu=gpu, rate=rate, regions=regions, image=IMAGE, sha=sha,
+                 scope=scope, remaining_usd=remaining, allocation_minutes=minutes)
     save("allocation.json", state)
     token = secrets.token_urlsafe(32)
     command = (f"git init -q /tmp/qwen && cd /tmp/qwen && git fetch -q --depth 1 "
@@ -111,7 +134,7 @@ def run(api):
                 ports=["8888/http"], gpu=dict(id=gpu,count=1,minCudaVersion="12.8"),
                 dataCenterIds=regions, entrypoint=["/bin/bash","-lc"], cmd=[command],
                 env=dict(BENCH_OWNER=REPOSITORY, BENCH_RUN=OWNER, RESULT_TOKEN=token,
-                         RUNPOD_PYTHON="/opt/venv/bin/python", MUON_SOURCE_COMMIT=sha))
+                         RUNPOD_PYTHON="/opt/venv/bin/python", MUON_SOURCE_COMMIT=sha, QWEN_SCOPE=scope))
     pod = api.call("/pods", "POST", body)["id"]
     if not re.fullmatch("[A-Za-z0-9_-]+", pod):
         raise ValueError("Invalid Pod identity")
@@ -122,7 +145,10 @@ def run(api):
         raise RuntimeError("Allocated GPU or rate outside approved bounds")
     state.update(rate=detail["cost"], region=detail["dataCenterId"])
     save("allocation.json", state)
-    while time.time() < state["started"] + 105*60:
+    state["allocation_minutes"] = allocation_minutes(remaining, state["rate"])
+    save("allocation.json", state)
+    last_progress = None
+    while time.time() < state["started"] + state["allocation_minutes"] * 60:
         try:
             result = request(f"https://{pod}-8888.proxy.runpod.net/result", token=token, limit=20_000_000)
         except RuntimeError:
@@ -130,13 +156,21 @@ def run(api):
             continue
         if "files" in result:
             save("worker.json", result)
+            progress = [result["stage"]]
+            for path, record in sorted(result["files"].items()):
+                if re.fullmatch(r"performance/(adamw|muon)-[0-9]+/progress.json", path):
+                    row = json.loads(record["text"])
+                    progress.append((path.split("/")[1], row["phase"], row["step"]))
+            if progress != last_progress:
+                print("Qwen progress", progress, flush=True)
+                last_progress = progress
         if result["status"] == "passed":
-            verify(result, sha, pod)
+            verify(result, sha, pod, scope)
             return
         if result["status"] == "failed":
             raise RuntimeError("Worker failed; inspect worker.json")
         time.sleep(15)
-    raise TimeoutError("105-minute allocation window elapsed")
+    raise TimeoutError("Budgeted allocation window elapsed; inspect latest worker snapshot")
 
 
 if __name__ == "__main__":

@@ -9,9 +9,10 @@ import subprocess
 import sys
 import threading
 
+from profiles import profile
+
 root = Path("/workspace/qwen-results")
-root.mkdir(parents=True, exist_ok=False)
-payload = b'{"status":"starting"}'
+state = ("dependencies", "running")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -20,7 +21,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.headers.get("Authorization", ""), "Bearer " + os.environ["RESULT_TOKEN"]):
             self.send_error(403)
             return
-        body = payload
+        body = collect(*state)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -30,27 +31,33 @@ class Handler(BaseHTTPRequestHandler):
 
 def collect(stage, status):
     files = {}
-    for p in sorted(root.rglob("*")):
-        if not p.is_file():
-            continue
+    # Read only public evidence. Avoid walking live checkpoint/tokenizer directories.
+    paths = list(root.glob("*.log"))
+    for suite in ("smoke", "performance"):
+        directory = root / suite
+        paths.extend(directory.glob("*.*"))
+        for pattern in ("adamw-[0-9]*", "muon-[0-9]*"):
+            for arm in directory.glob(pattern):
+                if arm.is_dir():
+                    paths.extend(arm.glob("*.json"))
+    for p in paths:
         name = p.relative_to(root)
-        if any(k in name.parts for k in ("data", "tokenizer", "checkpoints")):
-            continue
         if p.suffix in {".md", ".csv", ".json", ".txt", ".log"}:
             if p.suffix == ".log":
                 with p.open("rb") as f:
                     f.seek(max(0, p.stat().st_size - 5000))
-                    raw = f.read()
+                    raw = f.read(5000)
             else:
                 raw = p.read_bytes()
-            files[str(name)] = {"text": raw.decode(errors="replace"),
-                                "sha256": hashlib.sha256(raw).hexdigest()}
+            content = raw.decode(errors="replace")
+            files[str(name)] = {"text": content,
+                                "sha256": hashlib.sha256(content.encode()).hexdigest()}
     return json.dumps(dict(status=status, stage=stage, commit=os.environ["MUON_SOURCE_COMMIT"],
                            pod=os.environ["RUNPOD_POD_ID"], files=files)).encode()
 
 
 def train():
-    global payload
+    global state
     stage = "dependencies"
     try:
         with (root / "setup.log").open("w") as log:
@@ -58,18 +65,21 @@ def train():
                            stdout=log, stderr=subprocess.STDOUT, check=True)
             subprocess.run([sys.executable, "-m", "pip", "check"], stdout=log, stderr=subprocess.STDOUT, check=True)
         for stage in ("smoke", "performance"):
-            payload = collect(stage, "running")
+            cfg = root / (stage + "-config.json")
+            cfg.write_text(json.dumps(profile(stage, os.environ.get("QWEN_SCOPE", "all"))))
+            state = (stage, "running")
             with (root / (stage + ".log")).open("w") as log:
-                subprocess.run(["bash", "runpod/run.sh", "--config", f"runpod/qwen/{stage}.json",
+                subprocess.run(["bash", "runpod/run.sh", "--config", str(cfg),
                                 "--output", str(root / stage)], stdout=log, stderr=subprocess.STDOUT, check=True)
-        payload = collect(stage, "passed")
+        state = (stage, "passed")
     except Exception:
         import traceback
         (root / "error.log").write_text(traceback.format_exc())
-        payload = collect(stage, "failed")
+        state = (stage, "failed")
 
 
 if __name__ == "__main__":
+    root.mkdir(parents=True, exist_ok=False)
     server = ThreadingHTTPServer(("0.0.0.0", 8888), Handler)
     threading.Thread(target=train, daemon=True).start()
     server.serve_forever()
