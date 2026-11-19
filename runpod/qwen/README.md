@@ -15,7 +15,8 @@ are pinned in the profiles. The artifact contains per-run timing, peak memory,
 loss, accuracy, weighted F1, trainable shapes, software versions and data hashes.
 
 For the USD 5 campaign, dispatch qwen-gpu.yml on main with confirm_paid=true.
-Select seed-42 for one 200-step pair or all for the three-seed matrix. Each
+Select seed-42 for one 200-step pair, seeds-43-44 for the two remaining pairs,
+or all for the three-seed matrix. A split run keeps the original arm order. Each
 scope runs both smoke restart checks first. Enter the reconciled remaining
 campaign allowance in remaining_usd.
 The controller requires the repository or organization Actions secret RUNPOD_API_KEY.

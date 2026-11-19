@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from runpod import validate
 from runpod.validate import ROOT, write_json
 
 with patch.object(sys, "path", [str(ROOT / "runpod/qwen"), *sys.path]):
@@ -40,8 +41,34 @@ class QwenProgressTests(unittest.TestCase):
         cfg = profile("performance", "all")
         self.assertEqual(cfg["seeds"], [42, 43, 44])
         self.assertEqual(profile("performance", "seed-42"), dict(cfg, seeds=[42]))
+        self.assertEqual(profile("performance", "seeds-43-44"), dict(cfg, seeds=[43, 44], muon_first=True))
         with self.assertRaises(ValueError):
             profile("performance", "invalid")
+
+    def test_split_suite_keeps_the_original_arm_order(self):
+        def order(scope):
+            seen = []
+            def finish_arm(cmd, **kwargs):
+                mode = cmd[cmd.index("--mode") + 1]
+                seed = int(cmd[cmd.index("--seed") + 1])
+                seen.append((seed, mode))
+                write_json(Path(cmd[-1]) / "result.json",
+                           {"timing": {"mean_ms": 1, "examples_per_second": 1},
+                            "test": {"eval_accuracy": 1, "eval_f1": 1},
+                            "peak_cuda": {"train": {"allocated_mib": 1}}, "performance_eligible": True})
+            with tempfile.TemporaryDirectory() as tmp:
+                config = Path(tmp) / "config.json"
+                write_json(config, profile("performance", scope))
+                with patch.object(validate, "preflight", return_value={}), patch.object(
+                        validate, "command_output", return_value=""), patch.object(
+                        validate, "prepare_data", side_effect=lambda cfg, out: cfg), patch.object(
+                        validate.subprocess, "Popen"), patch.object(validate.subprocess, "run", side_effect=finish_arm):
+                    validate.suite(config, Path(tmp) / "suite")
+            return seen
+
+        full = [(42, "adamw"), (42, "muon"), (43, "muon"), (43, "adamw"), (44, "adamw"), (44, "muon")]
+        self.assertEqual(order("all"), full)
+        self.assertEqual(order("seed-42") + order("seeds-43-44"), full)
 
     def test_remaining_budget_reserves_cleanup_and_extras(self):
         for rate, expected in ((.89, 105), (1.39, 95), (2., 64)):

@@ -5,7 +5,7 @@ on:
       scope:
         type: choice
         description: Performance pairs after both smoke checks
-        options: [seed-42, all]
+        options: [seed-42, seeds-43-44, all]
         default: seed-42
       remaining_usd:
         type: string

@@ -462,7 +462,8 @@ def suite(config, output):
         write_json(output / "resolved-config.json", c)
         for index, seed in enumerate(c["seeds"]):
             # Alternate order to reduce systematic warm/cold GPU ordering bias.
-            for mode in (("adamw", "muon") if index % 2 == 0 else ("muon", "adamw")):
+            muon_first = bool(index % 2) != c.get("muon_first", False)
+            for mode in (("muon", "adamw") if muon_first else ("adamw", "muon")):
                 run_dir = output / f"{mode}-{seed}"
                 command = [sys.executable, str(Path(__file__).resolve()), "--worker",
                            "--config", str(output / "resolved-config.json"), "--mode", mode,
