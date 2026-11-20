@@ -153,6 +153,24 @@ def worker(c, output, mode, seed, resume=None):
 
     environment = preflight()
     output.mkdir(parents=True, exist_ok=False)
+    progress_enabled = c["model"] == "Qwen/Qwen3.5-0.8B" and not c["checkpoint_step"]
+    progress_start = time.monotonic()
+    cpu_start = time.process_time()
+    progress_samples = []
+
+    def progress(phase, step):
+        if progress_enabled:
+            row = {"phase": phase, "step": step, "elapsed_s": time.monotonic() - progress_start,
+                   "process_cpu_s": time.process_time() - cpu_start, "torch_threads": torch.get_num_threads()}
+            for filename in ("cpu.max", "cpu.stat"):
+                try:
+                    row[filename] = (Path("/sys/fs/cgroup") / filename).read_text().strip()
+                except OSError:
+                    pass
+            progress_samples.append(row)
+            write_json(output / "progress.json", {"phase": phase, "step": step, "samples": progress_samples})
+
+    progress("loading", 0)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.backends.cudnn.benchmark = False
@@ -231,6 +249,7 @@ def worker(c, output, mode, seed, resume=None):
 
         def on_train_begin(self, args, state, control, optimizer=None, **kw):
             self.start_step = state.global_step
+            progress("training", state.global_step)
             if resume and self.start_step != c["checkpoint_step"]:
                 raise RuntimeError("Trainer failed to restore global step")
             raw = getattr(optimizer, "optimizer", optimizer)
@@ -264,6 +283,8 @@ def worker(c, output, mode, seed, resume=None):
                     lrs[0] * c["learning_rate"], lrs[1] * c["muon_lr"], abs_tol=1e-12):
                 raise RuntimeError("Muon/head LR ratio changed")
             self.lrs.append({"step": state.global_step, "lr": lrs})
+            if progress_enabled and state.global_step % 20 == 0:
+                progress("training", state.global_step)
 
     audit = Audit()
     # Probe inside the autocast-wrapped forward, not outside Trainer's context.
@@ -318,6 +339,7 @@ def worker(c, output, mode, seed, resume=None):
         torch.save({"optimizer": trainer.optimizer.state_dict(),
                     "scheduler": trainer.lr_scheduler.state_dict()}, output / "final-state.pt")
     torch.cuda.reset_peak_memory_stats()
+    progress("evaluating", trainer.state.global_step)
     test = trainer.evaluate(ds["test"])
     if any(not math.isfinite(test[k]) for k in ("eval_loss", "eval_accuracy", "eval_f1")):
         raise RuntimeError("Nonfinite evaluation metrics")
@@ -346,6 +368,7 @@ def worker(c, output, mode, seed, resume=None):
         report["smoke_kernels"] = {"cudnn_deterministic": torch.backends.cudnn.deterministic,
                                    "attention": "math_sdpa"}
     write_json(output / "result.json", report)
+    progress("complete", trainer.state.global_step)
 
 
 def compare_resume(original, resumed, c):
@@ -439,7 +462,8 @@ def suite(config, output):
         write_json(output / "resolved-config.json", c)
         for index, seed in enumerate(c["seeds"]):
             # Alternate order to reduce systematic warm/cold GPU ordering bias.
-            for mode in (("adamw", "muon") if index % 2 == 0 else ("muon", "adamw")):
+            muon_first = bool(index % 2) != c.get("muon_first", False)
+            for mode in (("muon", "adamw") if muon_first else ("adamw", "muon")):
                 run_dir = output / f"{mode}-{seed}"
                 command = [sys.executable, str(Path(__file__).resolve()), "--worker",
                            "--config", str(output / "resolved-config.json"), "--mode", mode,

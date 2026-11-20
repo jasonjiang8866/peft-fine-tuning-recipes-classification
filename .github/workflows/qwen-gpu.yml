@@ -2,6 +2,15 @@ name: Qwen3.5 AdamW and Muon GPU comparison
 on:
   workflow_dispatch:
     inputs:
+      scope:
+        type: choice
+        description: Performance pairs after both smoke checks
+        options: [seed-42, seeds-43-44, all]
+        default: seed-42
+      remaining_usd:
+        type: string
+        required: true
+        description: Remaining campaign dollars including cleanup and extras (reconcile before each dispatch)
       confirm_paid:
         type: boolean
         description: One new allocation within the USD 5 total experiment budget
@@ -30,6 +39,8 @@ jobs:
         timeout-minutes: 109
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          QWEN_SCOPE: ${{ inputs.scope }}
+          QWEN_REMAINING_USD: ${{ inputs.remaining_usd }}
         run: python runpod/qwen/controller.py run
       - name: Delete owned Pod and verify absence
         if: always() && hashFiles('qwen-evidence/allocation.json') != ''
