@@ -13,7 +13,7 @@ from runpod.validate import ROOT, write_json
 
 with patch.object(sys, "path", [str(ROOT / "runpod/qwen"), *sys.path]):
     from runpod.qwen import controller, worker
-    from profiles import profile
+    from profiles import SCREEN_RATES, profile, select_rate, sweep_profile
 
 
 class QwenProgressTests(unittest.TestCase):
@@ -44,6 +44,31 @@ class QwenProgressTests(unittest.TestCase):
         self.assertEqual(profile("performance", "seeds-43-44"), dict(cfg, seeds=[43, 44], muon_first=True))
         with self.assertRaises(ValueError):
             profile("performance", "invalid")
+
+    def test_sweep_locks_validation_winner_before_confirmation(self):
+        rows = {}
+        for stage, rate in SCREEN_RATES.items():
+            cfg = sweep_profile(stage)
+            self.assertEqual(cfg["eval_splits"], ["validation"])
+            modes = cfg.get("modes", ["adamw", "muon"])
+            self.assertEqual(modes, ["adamw", "muon"] if rate == .02 else ["muon"])
+            self.assertEqual((cfg["seeds"], cfg["max_steps"]), ([42], 200))
+            rows[f"{stage}/muon-42/result.json"] = {
+                "status": "passed", "config": cfg, "validation": {"eval_f1": .8, "eval_loss": .5}}
+        self.assertEqual(select_rate(rows.__getitem__), .002)
+        medium = rows["screen-006/muon-42/result.json"]
+        medium["validation"]["eval_loss"] = .4
+        self.assertEqual(select_rate(rows.__getitem__), .006)
+        control = rows["screen-020/muon-42/result.json"]
+        control["validation"]["eval_f1"] = .81
+        chosen = select_rate(rows.__getitem__)
+        self.assertEqual(chosen, .02)
+        confirm = sweep_profile("confirmation", chosen)
+        self.assertEqual((confirm["seeds"], confirm["eval_splits"], confirm["muon_lr"]),
+                         ([43, 44], ["validation", "test"], chosen))
+        control["test"] = {}
+        with self.assertRaises(ValueError):
+            select_rate(rows.__getitem__)
 
     def test_split_suite_keeps_the_original_arm_order(self):
         def order(scope):

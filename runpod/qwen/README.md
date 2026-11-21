@@ -14,11 +14,11 @@ length 512, and omits the first 20 steps from timing. Weight and dataset revisio
 are pinned in the profiles. The artifact contains per-run timing, peak memory,
 loss, accuracy, weighted F1, trainable shapes, software versions and data hashes.
 
-For the USD 5 campaign, dispatch qwen-gpu.yml on main with confirm_paid=true.
+For the original fixed-rate comparison, dispatch qwen-gpu.yml on main with confirm_paid=true.
 Select seed-42 for one 200-step pair, seeds-43-44 for the two remaining pairs,
 or all for the three-seed matrix. A split run keeps the original arm order. Each
 scope runs both smoke restart checks first. Enter the reconciled remaining
-campaign allowance in remaining_usd.
+allowance for this allocation in remaining_usd (maximum USD 5).
 The controller requires the repository or organization Actions secret RUNPOD_API_KEY.
 It searches secure capacity globally for one 4090, 3090, or 5090 in that order,
 requires CUDA 12.8 or newer, and rejects prices above USD 2/hour. The controller
@@ -50,3 +50,26 @@ progress updates every 20 steps with process CPU time, wall time, Torch thread
 count and available cgroup v2 CPU quota/throttling counters. Compare deltas
 between samples to investigate low utilization. A timed-out run may contain
 individual results. Only a passed suite covers its selected scope.
+
+
+## Validation-selected Muon learning rate
+
+Dispatch `lr-sweep` on main for one secure RTX 4090. The single allocation
+runs both smoke restarts, then screens AdamW and Muon at 0.02, 0.006 and 0.002
+(Muon only for the latter two) using seed 42. Every full arm trains for 200
+steps on the original 8,192 rows. Screening uses 1,024 stratified rows from
+the held-out tenth of the AG News training split. The official test split is
+only evaluated during confirmation.
+
+The worker locks the Muon rate by maximum validation weighted F1, then minimum
+validation loss, then lower learning rate. Fresh paired runs on seeds 43 and
+44 evaluate both validation and the original 1,024 test examples. Those test
+examples were also used by the published fixed-rate comparison. Compare the
+two confirmation seeds separately from the exploratory seed. The controller
+recomputes the choice from artifact metrics and checks identical train and
+validation hashes across all full runs. Per-arm result files retain both sets
+of confirmation metrics. Suite summary tables use validation for this scope.
+
+Use a per-allocation allowance of USD 5 or less, including the existing USD 1
+reserve. Reconcile actual usage before another dispatch. This sweep retains
+the existing 105-minute ceiling and cleanup verification.

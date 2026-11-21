@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 
-from profiles import profile
+from profiles import SCREEN_RATES, SWEEP, profile, select_rate, sweep_profile
 
 root = Path("/workspace/qwen-results")
 state = ("dependencies", "running")
@@ -33,7 +33,7 @@ def collect(stage, status):
     files = {}
     # Read only public evidence. Avoid walking live checkpoint/tokenizer directories.
     paths = list(root.glob("*.log"))
-    for suite in ("smoke", "performance"):
+    for suite in ("smoke", "performance", *SCREEN_RATES, "confirmation"):
         directory = root / suite
         paths.extend(directory.glob("*.*"))
         for pattern in ("adamw-[0-9]*", "muon-[0-9]*"):
@@ -64,9 +64,18 @@ def train():
             subprocess.run([sys.executable, "-m", "pip", "install", "-r", "runpod/qwen/requirements.txt"],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
             subprocess.run([sys.executable, "-m", "pip", "check"], stdout=log, stderr=subprocess.STDOUT, check=True)
-        for stage in ("smoke", "performance"):
+        scope = os.environ.get("QWEN_SCOPE", "all")
+        stages = ("smoke", *SCREEN_RATES, "confirmation") if scope == SWEEP else ("smoke", "performance")
+        for stage in stages:
             cfg = root / (stage + "-config.json")
-            cfg.write_text(json.dumps(profile(stage, os.environ.get("QWEN_SCOPE", "all"))))
+            if scope == SWEEP:
+                selected = None
+                if stage == "confirmation":
+                    selected = select_rate(lambda path: json.loads((root / path).read_text()))
+                config = sweep_profile(stage, selected)
+            else:
+                config = profile(stage, scope)
+            cfg.write_text(json.dumps(config))
             state = (stage, "running")
             with (root / (stage + ".log")).open("w") as log:
                 subprocess.run(["bash", "runpod/run.sh", "--config", str(cfg),
