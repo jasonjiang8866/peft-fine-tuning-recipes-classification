@@ -43,6 +43,10 @@ def read_config(path):
         raise ValueError("seeds must be a nonempty list of nonnegative integers")
     if len(set(c["seeds"])) != len(c["seeds"]):
         raise ValueError("seeds must be unique")
+    if c.get("eval_splits", ["test"]) not in (["test"], ["validation"], ["validation", "test"]):
+        raise ValueError("Expected test, validation, or validation followed by test")
+    if "modes" in c and c["modes"] != ["muon"]:
+        raise ValueError("Only the Muon learning-rate screen may override paired mode order")
     effective = c["batch_size"] * c["gradient_accumulation_steps"]
     if c["train_samples"] < effective or c["train_samples"] % effective:
         raise ValueError("train_samples must be a multiple of effective batch size")
@@ -122,8 +126,15 @@ def prepare_data(c, output):
     # Match training.py split; subset selection is shared across ALL seeds and arms.
     split = ds["train"].train_test_split(test_size=0.1, seed=42, stratify_by_column="label")
     chosen = DatasetDict()
-    for name, source, count in (("train", split["train"], c["train_samples"]),
-                                ("test", ds["test"], c["eval_samples"])):
+    sources = {"train": split["train"]}
+    if "validation" in c.get("eval_splits", []):
+        # Draw a stratified subset from the held-out training rows.
+        sources["validation"] = split["test"].train_test_split(
+            train_size=c["eval_samples"], stratify_by_column="label", seed=42)["train"]
+    if "test" in c.get("eval_splits", ["test"]):
+        sources["test"] = ds["test"]
+    for name, source in sources.items():
+        count = c["train_samples"] if name == "train" else c["eval_samples"]
         if count > len(source):
             raise ValueError(f"{name}_samples exceeds available examples")
         chosen[name] = source.shuffle(seed=42).select(range(count)).map(
@@ -299,14 +310,14 @@ def worker(c, output, mode, seed, resume=None):
         model.register_forward_pre_hook(trace.before_forward, with_kwargs=True)
         model.register_forward_hook(trace.after_forward)
         kwargs["callbacks"].append(trace)
-    def metrics(pred):
+    def compute_metrics(pred):
         labels = pred.label_ids
         predicted = np.argmax(pred.predictions, axis=1)
         return {"accuracy": accuracy_score(labels, predicted),
                 "f1": f1_score(labels, predicted, average="weighted", zero_division=0)}
     trainer = Trainer(model=model, args=args, train_dataset=ds["train"],
                       processing_class=tok, data_collator=DataCollatorWithPadding(tok),
-                      compute_metrics=metrics, **kwargs)
+                      compute_metrics=compute_metrics, **kwargs)
     torch.cuda.synchronize()
     start = time.perf_counter()
     trained = trainer.train(resume_from_checkpoint=str(resume) if resume else None)
@@ -340,9 +351,12 @@ def worker(c, output, mode, seed, resume=None):
                     "scheduler": trainer.lr_scheduler.state_dict()}, output / "final-state.pt")
     torch.cuda.reset_peak_memory_stats()
     progress("evaluating", trainer.state.global_step)
-    test = trainer.evaluate(ds["test"])
-    if any(not math.isfinite(test[k]) for k in ("eval_loss", "eval_accuracy", "eval_f1")):
-        raise RuntimeError("Nonfinite evaluation metrics")
+    evaluations = {}
+    for split in c.get("eval_splits", ["test"]):
+        metrics = trainer.evaluate(ds[split])
+        if any(not math.isfinite(metrics[k]) for k in ("eval_loss", "eval_accuracy", "eval_f1")):
+            raise RuntimeError("Nonfinite evaluation metrics")
+        evaluations[split] = metrics
     report = {
         "status": "passed", "mode": mode, "seed": seed, "config": c,
         "environment": environment, "global_steps": trainer.state.global_step,
@@ -359,7 +373,7 @@ def worker(c, output, mode, seed, resume=None):
         "loss_trace": loss, "lr_trace": audit.lrs, "step_time_ms": run.callback.times,
         "timing": timing_summary(run.callback.times, c["skip_steps"],
                                   c["batch_size"] * c["gradient_accumulation_steps"]),
-        "train_wall_seconds": train_seconds, "test": test,
+        "train_wall_seconds": train_seconds, **evaluations,
         "peak_cuda": {"load_allocated_mib": load_peak, "train": train_peak,
                       "eval_allocated_mib": torch.cuda.max_memory_allocated() / 2**20},
         "performance_eligible": not smoke and not resume}
@@ -417,7 +431,7 @@ def compare_resume(original, resumed, c):
     return result
 
 
-def summarize(output, records):
+def summarize(output, records, split="test"):
     summary = {"status": "passed", "runs": records, "aggregates": {}}
     columns = ["mode", "seed", "mean_step_ms", "examples_per_second", "accuracy", "f1", "train_peak_mib"]
     with (output / "summary.csv").open("w", newline="") as stream:
@@ -439,7 +453,7 @@ def summarize(output, records):
         lines.append("| {mode} | {seed} | {mean_step_ms:.2f} | {examples_per_second:.2f} | {accuracy:.4f} | {f1:.4f} | {train_peak_mib:.1f} |".format(**r))
     lines += ["", "Smoke runs include gradient probes/checkpoint I/O and are NOT performance measurements.",
               "Step timing is synchronized optimizer-step compute (including gradient accumulation), not end-to-end data throughput.",
-              "See train_wall_seconds for training-loop wall time. Evaluation uses a fixed test subset; this is not a tuned optimizer ranking."]
+              "See train_wall_seconds for training-loop wall time. Evaluation uses a fixed " + split + " subset."]
     (output / "summary.md").write_text("\n".join(lines) + "\n")
 
 
@@ -460,10 +474,12 @@ def suite(config, output):
         c = prepare_data(c, output)
         c["data_root"] = str(output.resolve())
         write_json(output / "resolved-config.json", c)
+        split = c.get("eval_splits", ["test"])[0]
         for index, seed in enumerate(c["seeds"]):
             # Alternate order to reduce systematic warm/cold GPU ordering bias.
             muon_first = bool(index % 2) != c.get("muon_first", False)
-            for mode in (("muon", "adamw") if muon_first else ("adamw", "muon")):
+            order = ("muon", "adamw") if muon_first else ("adamw", "muon")
+            for mode in c.get("modes", order):
                 run_dir = output / f"{mode}-{seed}"
                 command = [sys.executable, str(Path(__file__).resolve()), "--worker",
                            "--config", str(output / "resolved-config.json"), "--mode", mode,
@@ -481,12 +497,12 @@ def suite(config, output):
                 records.append({"mode": mode, "seed": seed, "path": str(run_dir),
                                 "mean_step_ms": report["timing"]["mean_ms"],
                                 "examples_per_second": report["timing"]["examples_per_second"],
-                                "accuracy": report["test"]["eval_accuracy"],
-                                "f1": report["test"]["eval_f1"],
+                                "accuracy": report[split]["eval_accuracy"],
+                                "f1": report[split]["eval_f1"],
                                 "train_peak_mib": report["peak_cuda"]["train"]["allocated_mib"],
                                 "performance_eligible": report["performance_eligible"]})
                 print(f"PASS {mode} seed={seed}; results: {run_dir}", flush=True)
-        summarize(output, records)
+        summarize(output, records, split)
         write_json(output / "status.json", {"status": "passed"})
     except Exception as error:
         write_json(output / "status.json", {"status": "failed", "error": str(error), "completed_runs": records})
