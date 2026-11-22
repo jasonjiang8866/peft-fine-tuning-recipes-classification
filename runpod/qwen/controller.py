@@ -10,7 +10,7 @@ import sys
 import time
 from urllib.parse import quote
 
-from profiles import SCREEN_RATES, SWEEP, profile, select_rate, sweep_profile
+from profiles import TWO_B_SEEDS, SWEEP, profile, select_rate, stages_for, sweep_profile
 from provider import REPOSITORY, Runpod, budget, finite, identity, request
 
 OUT = Path("qwen-evidence")
@@ -76,6 +76,28 @@ def allocation_minutes(remaining, rate):
     return minutes
 
 
+def verify_predictions(examples, predictions, metrics, count):
+    # Source row IDs refer to the pinned AG News train or test split.
+    if len(examples) != count or len(predictions) != count or len({x[0] for x in examples}) != count:
+        raise ValueError("Missing or duplicate prediction rows")
+    confusion = [[0] * 4 for _ in range(4)]
+    for (row_id, label), (pred_id, pred_label, predicted) in zip(examples, predictions):
+        if ((pred_id, pred_label) != (row_id, label) or type(row_id) is not int or row_id < 0
+                or type(label) is not int or type(predicted) is not int
+                or label not in range(4) or predicted not in range(4)):
+            raise ValueError("Prediction example identity or class mismatch")
+        confusion[label][predicted] += 1
+    correct = sum(confusion[i][i] for i in range(4))
+    weighted_f1 = 0.0
+    for i, row in enumerate(confusion):
+        support = sum(row)
+        if support:
+            weighted_f1 += support * 2 * row[i] / (support + sum(r[i] for r in confusion))
+    if not (math.isclose(correct / count, metrics["eval_accuracy"], abs_tol=1e-10)
+            and math.isclose(weighted_f1 / count, metrics["eval_f1"], abs_tol=1e-10)):
+        raise ValueError("Prediction metrics disagree with Trainer")
+
+
 def verify(result, sha, pod, scope="all"):
     if result["commit"] != sha or result["pod"] != pod:
         raise ValueError("Worker provenance mismatch")
@@ -86,8 +108,7 @@ def verify(result, sha, pod, scope="all"):
     def read(key):
         return json.loads(files[key]["text"])
     shared_hashes = {}
-    stages = ("smoke", *SCREEN_RATES, "confirmation") if scope == SWEEP else ("smoke", "performance")
-    for stage in stages:
+    for stage in stages_for(scope):
         if scope == SWEEP:
             selected = select_rate(read) if stage == "confirmation" else None
             cfg = sweep_profile(stage, selected)
@@ -117,11 +138,16 @@ def verify(result, sha, pod, scope="all"):
                         or row["integration"]["int8_linear_layers"] < 1
                         or row["timing"]["timed_steps"] != cfg["max_steps"] - cfg["skip_steps"]):
                     raise ValueError("Incomplete training evidence: " + prefix)
-                if scope == SWEEP:
+                if scope == SWEEP or scope in TWO_B_SEEDS:
                     if ("test" in row) != ("test" in splits) or any(
                             not math.isfinite(row[split][key]) for split in splits
                             for key in ("eval_loss", "eval_accuracy", "eval_f1")):
                         raise ValueError("Unexpected sweep evaluation evidence")
+                if cfg.get("save_predictions"):
+                    predictions = read(prefix + "/predictions.json")
+                    for split in splits:
+                        verify_predictions(read(f"{stage}/{split}-examples.json"), predictions[split],
+                                           row[split], cfg["eval_samples"])
                 if stage == "smoke" and read(prefix + "-resumed/resume-comparison.json")["status"] != "passed":
                     raise ValueError("Resume comparison failed")
 
@@ -136,9 +162,9 @@ def run(api):
         raise RuntimeError("An owned Pod already exists")
     scope = os.environ.get("QWEN_SCOPE", "all")
     if scope != SWEEP:
-        profile("performance", scope)
+        profile(stages_for(scope)[-1], scope)
     remaining = float(os.environ["QWEN_REMAINING_USD"])
-    gpu, rate, regions = select(api, GPUS[:1] if scope == SWEEP else GPUS)
+    gpu, rate, regions = select(api, GPUS[:1] if scope == SWEEP or scope in TWO_B_SEEDS else GPUS)
     minutes = allocation_minutes(remaining, rate)
     save("budget.json", budget(api, reserve=remaining))
     state = dict(started=time.time(), gpu=gpu, rate=rate, regions=regions, image=IMAGE, sha=sha,

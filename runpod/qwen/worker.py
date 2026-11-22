@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 
-from profiles import SCREEN_RATES, SWEEP, profile, select_rate, sweep_profile
+from profiles import SCREEN_RATES, SWEEP, profile, select_rate, stages_for, sweep_profile
 
 root = Path("/workspace/qwen-results")
 state = ("dependencies", "running")
@@ -65,8 +65,7 @@ def train():
                            stdout=log, stderr=subprocess.STDOUT, check=True)
             subprocess.run([sys.executable, "-m", "pip", "check"], stdout=log, stderr=subprocess.STDOUT, check=True)
         scope = os.environ.get("QWEN_SCOPE", "all")
-        stages = ("smoke", *SCREEN_RATES, "confirmation") if scope == SWEEP else ("smoke", "performance")
-        for stage in stages:
+        for stage in stages_for(scope):
             cfg = root / (stage + "-config.json")
             if scope == SWEEP:
                 selected = None
