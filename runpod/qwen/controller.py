@@ -1,4 +1,4 @@
-"""One manual allocation for the USD 5 Qwen optimizer comparison."""
+"""One budgeted manual allocation for the Qwen optimizer comparison."""
 import hashlib
 import json
 import math
@@ -10,7 +10,7 @@ import sys
 import time
 from urllib.parse import quote
 
-from profiles import profile
+from profiles import SCREEN_RATES, SWEEP, profile, select_rate, sweep_profile
 from provider import REPOSITORY, Runpod, budget, finite, identity, request
 
 OUT = Path("qwen-evidence")
@@ -30,8 +30,8 @@ def save(name, data):
     tmp.replace(p)
 
 
-def select(api):
-    for gpu in GPUS:
+def select(api, gpus=GPUS):
+    for gpu in gpus:
         catalog = api.call("/catalog/gpus/" + quote(gpu, safe="") +
                            "?include=AVAILABILITY&product=POD&cloud=SECURE&count=1&minCudaVersion=12.8")
         rate = catalog.get("price", {}).get("secure")
@@ -85,26 +85,43 @@ def verify(result, sha, pod, scope="all"):
             raise ValueError("Result checksum mismatch")
     def read(key):
         return json.loads(files[key]["text"])
-    for stage in ("smoke", "performance"):
-        cfg = profile(stage, scope)
+    shared_hashes = {}
+    stages = ("smoke", *SCREEN_RATES, "confirmation") if scope == SWEEP else ("smoke", "performance")
+    for stage in stages:
+        if scope == SWEEP:
+            selected = select_rate(read) if stage == "confirmation" else None
+            cfg = sweep_profile(stage, selected)
+        else:
+            cfg = profile(stage, scope)
         if read(f"{stage}/status.json")["status"] != "passed":
             raise ValueError("Incomplete suite")
         expected_hashes = read(f"{stage}/resolved-config.json")["data_sha256"]
-        if not all(re.fullmatch("[0-9a-f]{64}", expected_hashes[key]) for key in ("train", "test")):
+        splits = cfg.get("eval_splits", ["test"])
+        if (set(expected_hashes) != {"train", *splits}
+                or not all(re.fullmatch("[0-9a-f]{64}", h) for h in expected_hashes.values())):
             raise ValueError("Missing dataset hash")
+        if scope == SWEEP and stage != "smoke":
+            for split, digest in expected_hashes.items():
+                if shared_hashes.setdefault(split, digest) != digest:
+                    raise ValueError("Data changed across sweep stages")
         for seed in cfg["seeds"]:
-            for mode in ("adamw", "muon"):
+            for mode in cfg.get("modes", ("adamw", "muon")):
                 prefix = f"{stage}/{mode}-{seed}"
                 row = read(prefix + "/result.json")
                 if (row["mode"] != mode or row["seed"] != seed or row["status"] != "passed"
                         or any(cfg[k] != row["config"][k] for k in cfg)
                         or row["global_steps"] != cfg["max_steps"]
                         or row["config"]["data_sha256"] != expected_hashes
-                        or row["performance_eligible"] != (stage == "performance")
+                        or row["performance_eligible"] != (stage != "smoke")
                         or not row["integration"]["bf16_autocast_observed"]
                         or row["integration"]["int8_linear_layers"] < 1
                         or row["timing"]["timed_steps"] != cfg["max_steps"] - cfg["skip_steps"]):
                     raise ValueError("Incomplete training evidence: " + prefix)
+                if scope == SWEEP:
+                    if ("test" in row) != ("test" in splits) or any(
+                            not math.isfinite(row[split][key]) for split in splits
+                            for key in ("eval_loss", "eval_accuracy", "eval_f1")):
+                        raise ValueError("Unexpected sweep evaluation evidence")
                 if stage == "smoke" and read(prefix + "-resumed/resume-comparison.json")["status"] != "passed":
                     raise ValueError("Resume comparison failed")
 
@@ -118,9 +135,10 @@ def run(api):
     if any(p.get("env", {}).get("BENCH_OWNER") == REPOSITORY for p in api.listing("/pods","pods")):
         raise RuntimeError("An owned Pod already exists")
     scope = os.environ.get("QWEN_SCOPE", "all")
-    profile("performance", scope)
+    if scope != SWEEP:
+        profile("performance", scope)
     remaining = float(os.environ["QWEN_REMAINING_USD"])
-    gpu, rate, regions = select(api)
+    gpu, rate, regions = select(api, GPUS[:1] if scope == SWEEP else GPUS)
     minutes = allocation_minutes(remaining, rate)
     save("budget.json", budget(api, reserve=remaining))
     state = dict(started=time.time(), gpu=gpu, rate=rate, regions=regions, image=IMAGE, sha=sha,
@@ -158,7 +176,7 @@ def run(api):
             save("worker.json", result)
             progress = [result["stage"]]
             for path, record in sorted(result["files"].items()):
-                if re.fullmatch(r"performance/(adamw|muon)-[0-9]+/progress.json", path):
+                if re.fullmatch(r"(performance|screen-[0-9]+|confirmation)/(adamw|muon)-[0-9]+/progress.json", path):
                     row = json.loads(record["text"])
                     progress.append((path.split("/")[1], row["phase"], row["step"]))
             if progress != last_progress:
