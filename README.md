@@ -4,6 +4,8 @@ This repository contains LoRA recipes for text classification with quantized lan
 
 ## Qwen3.5-0.8B optimizer results
 
+### Fixed Muon learning rate (0.02)
+
 On AG News, AdamW reached **88.48% mean test accuracy** across three training seeds. Muon on the LoRA matrices reached **82.75%**. AdamW led by 3.52–7.23 percentage points in the paired runs.
 
 | Training seed | AdamW accuracy | Muon accuracy | AdamW weighted F1 | Muon weighted F1 |
@@ -18,6 +20,17 @@ Each pair trained for 200 optimizer steps on the same RTX 4090 and used the same
 After excluding the first 20 steps of each run, mean synchronized step time was **1.098 s for AdamW** and **1.135 s for Muon**. Both optimizers also passed the separate 12-step checkpoint test, with zero maximum tensor difference between uninterrupted and resumed runs.
 
 [Seed 42 run](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/44840725315) · [Seeds 43 and 44 run](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/44843308233) · [Reproduction guide](runpod/qwen/README.md) · [Training profile](runpod/qwen/performance.json)
+
+### Validation-selected Muon learning rate (0.002)
+
+At seed 42, Muon validation weighted F1 was 0.8599 at 0.02, 0.8648 at 0.006 and **0.9079 at 0.002**. AdamW scored 0.9083. The screen used 1,024 stratified examples held out from the AG News training split. The winning rate was locked before confirmation. Each optimizer used its own fresh 200-step run for each confirmation seed.
+
+| Seed | Validation F1, AdamW / Muon | Test F1, AdamW / Muon | Test accuracy, AdamW / Muon |
+| --- | --- | --- | --- |
+| 43 | 0.9061 / 0.9089 | 0.8766 / 0.8856 | 87.70% / 88.57% |
+| 44 | 0.8979 / 0.8780 | 0.8787 / 0.8818 | 87.89% / 88.18% |
+
+Muon led by 0.59 percentage points in mean accuracy on the previously used 1,024 test examples. Validation F1 favored a different optimizer at each seed. Mean synchronized step time was 1.011 s for AdamW and 1.107 s for Muon on the same RTX 4090. [Learning-rate screen and paired confirmation](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/45010941362)
 
 ## Features
 
