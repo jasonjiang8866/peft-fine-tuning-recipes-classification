@@ -14,6 +14,8 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from runpod.qwen.profiles import QWEN_TEXT_MODELS
+
 
 def write_json(path, value):
     path = Path(path)
@@ -120,9 +122,12 @@ def prepare_data(c, output):
     c["model_revision"] = api.model_info(c["model"], revision=c["model_revision"]).sha
     c["dataset_revision"] = api.dataset_info(c["dataset"], revision=c["dataset_revision"]).sha
     tok = AutoTokenizer.from_pretrained(c["model"], revision=c["model_revision"])
-    if c["model"] != "Qwen/Qwen3.5-0.8B" or tok.pad_token is None:
+    if c["model"] not in QWEN_TEXT_MODELS or tok.pad_token is None:
         tok.pad_token = tok.eos_token
     ds = load_dataset(c["dataset"], revision=c["dataset_revision"])
+    if c.get("save_predictions"):
+        for name in ("train", "test"):
+            ds[name] = ds[name].add_column("source_row", range(len(ds[name])))
     # Match training.py split; subset selection is shared across ALL seeds and arms.
     split = ds["train"].train_test_split(test_size=0.1, seed=42, stratify_by_column="label")
     chosen = DatasetDict()
@@ -137,7 +142,12 @@ def prepare_data(c, output):
         count = c["train_samples"] if name == "train" else c["eval_samples"]
         if count > len(source):
             raise ValueError(f"{name}_samples exceeds available examples")
-        chosen[name] = source.shuffle(seed=42).select(range(count)).map(
+        subset = source.shuffle(seed=42).select(range(count))
+        if c.get("save_predictions"):
+            if name != "train":
+                write_json(output / f"{name}-examples.json", list(zip(subset["source_row"], subset["label"])))
+            subset = subset.remove_columns("source_row")
+        chosen[name] = subset.map(
             lambda batch: tok(batch["text"], truncation=True, max_length=c["max_length"]),
             batched=True, remove_columns=["text"])
     chosen.save_to_disk(str(output / "data"))
@@ -164,7 +174,7 @@ def worker(c, output, mode, seed, resume=None):
 
     environment = preflight()
     output.mkdir(parents=True, exist_ok=False)
-    progress_enabled = c["model"] == "Qwen/Qwen3.5-0.8B" and not c["checkpoint_step"]
+    progress_enabled = c["model"] in QWEN_TEXT_MODELS and not c["checkpoint_step"]
     progress_start = time.monotonic()
     cpu_start = time.process_time()
     progress_samples = []
@@ -192,7 +202,7 @@ def worker(c, output, mode, seed, resume=None):
     torch.cuda.reset_peak_memory_stats()
     options = {"num_labels": 4}
     quantization = BitsAndBytesConfig(load_in_8bit=True)
-    if c["model"] == "Qwen/Qwen3.5-0.8B":
+    if c["model"] in QWEN_TEXT_MODELS:
         from transformers import Qwen3_5TextConfig
 
         config = Qwen3_5TextConfig.from_pretrained(c["model"], revision=c["model_revision"])
@@ -228,7 +238,7 @@ def worker(c, output, mode, seed, resume=None):
     before = {n: p.detach().cpu().clone() for n, p in model.named_parameters()
               if p.requires_grad} if smoke else {}
     load_peak = torch.cuda.max_memory_allocated() / 2**20
-    trace_resume = smoke and c["model"] == "Qwen/Qwen3.5-0.8B"
+    trace_resume = smoke and c["model"] in QWEN_TEXT_MODELS
     if trace_resume:
         # Keep convolution and attention backward reproducible for restart checks.
         # Global deterministic mode can reject the DeltaNet CUDA floating-point cumsum.
@@ -352,11 +362,24 @@ def worker(c, output, mode, seed, resume=None):
     torch.cuda.reset_peak_memory_stats()
     progress("evaluating", trainer.state.global_step)
     evaluations = {}
+    predictions = {}
     for split in c.get("eval_splits", ["test"]):
-        metrics = trainer.evaluate(ds[split])
+        if c.get("save_predictions"):
+            output_batch = trainer.predict(ds[split], metric_key_prefix="eval")
+            metrics = output_batch.metrics
+            examples = json.loads((data_root / f"{split}-examples.json").read_text())
+            labels = output_batch.label_ids.tolist()
+            if labels != [label for _, label in examples]:
+                raise ValueError("Prediction order does not match the evaluation examples")
+            classes = np.argmax(output_batch.predictions, axis=1).tolist()
+            predictions[split] = [[idx, label, pred] for (idx, label), pred in zip(examples, classes)]
+        else:
+            metrics = trainer.evaluate(ds[split])
         if any(not math.isfinite(metrics[k]) for k in ("eval_loss", "eval_accuracy", "eval_f1")):
             raise RuntimeError("Nonfinite evaluation metrics")
         evaluations[split] = metrics
+    if predictions:
+        write_json(output / "predictions.json", predictions)
     report = {
         "status": "passed", "mode": mode, "seed": seed, "config": c,
         "environment": environment, "global_steps": trainer.state.global_step,

@@ -1,4 +1,6 @@
-# Qwen3.5-0.8B paired optimizer experiment
+# Qwen3.5 paired optimizer experiments
+
+## 0.8B baseline and learning-rate screen
 
 The manual Qwen GPU workflow loads the text backbone of the pinned public
 Qwen checkpoint and adds a four-class AG News head. The six full-attention
@@ -73,3 +75,33 @@ of confirmation metrics. Suite summary tables use validation for this scope.
 Use a per-allocation allowance of USD 5 or less, including the existing USD 1
 reserve. Reconcile actual usage before another dispatch. This sweep retains
 the existing 105-minute ceiling and cleanup verification.
+
+## 2B learning-rate transfer
+
+The 2B scopes use the [pinned Qwen3.5-2B text configuration](https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/config.json).
+They carry over the Muon adapter rate of 0.002 selected on 0.8B. Head AdamW
+and baseline AdamW both use 0.0002. The 24 text layers include six full-attention
+layers with q/k/v/o targets, yielding 48 trainable LoRA matrices at rank 16.
+
+| Manual scope | Work on one RTX 4090 |
+| --- | --- |
+| `2b-smoke` | Compare uninterrupted and step-6-restored runs for both optimizers over 12 steps. Use batch 8, a 512-token cap and one microbatch per step. |
+| `2b-seed-42`, `2b-seed-43`, `2b-seed-44` | Run smoke, then one paired 200-step experiment. Seed 43 runs Muon first. |
+| `2b-all` | Run smoke, then all three pairs in the same allocation. |
+
+Use the smoke artifact to inspect peak allocated/reserved memory and observed
+step times before choosing an allocation size. Smoke uses checkpoint probes,
+deterministic kernels and a smaller data subset. Its timing and peak memory
+are preliminary. A full seed pair measures the normal training path.
+Each dispatch retains the existing per-allocation budget and cleanup checks.
+
+The primary endpoint is paired validation weighted F1. Compare per-seed
+differences, then their mean over seeds 42–44. Report test accuracy and
+weighted F1 on the previously evaluated test subset as secondary endpoints.
+Report step time over the final 180 steps and peak training memory.
+Each full arm writes `predictions.json` with validation and test rows of
+`[source_row, gold_class, predicted_class]`. Source rows are zero-based in
+the pinned AG News train split for validation and test split for testing.
+The controller checks each row against the split manifest and recomputes
+accuracy and weighted F1. When combining separately dispatched seeds, check
+that the manifests and dataset digests match across artifacts.

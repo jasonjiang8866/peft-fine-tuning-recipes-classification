@@ -4,7 +4,32 @@ import math
 from pathlib import Path
 
 
+TWO_B = "Qwen/Qwen3.5-2B"
+QWEN_TEXT_MODELS = {"Qwen/Qwen3.5-0.8B", TWO_B}
+TWO_B_SEEDS = {"2b-smoke": [42], "2b-seed-42": [42], "2b-seed-43": [43],
+               "2b-seed-44": [44], "2b-all": [42, 43, 44]}
+
+
+def stages_for(scope):
+    if scope == "2b-smoke":
+        return ("smoke",)
+    if scope == SWEEP:
+        return ("smoke", *SCREEN_RATES, "confirmation")
+    return ("smoke", "performance")
+
+
 def profile(stage, scope):
+    if scope in TWO_B_SEEDS:
+        cfg = profile(stage, "all")
+        cfg.update(model=TWO_B, model_revision="15852e8c16360a2fea060d615a32b45270f8a8fc",
+                   muon_lr=0.002, eval_splits=["validation"])
+        if stage == "smoke":
+            cfg.update(batch_size=8, eval_batch_size=8, gradient_accumulation_steps=1, max_length=512)
+        else:
+            seeds = TWO_B_SEEDS[scope]
+            cfg.update(seeds=seeds, muon_first=seeds[0] == 43, eval_splits=["validation", "test"],
+                       save_predictions=True)
+        return cfg
     if scope not in {"all", "seed-42", "seeds-43-44"}:
         raise ValueError("Unknown Qwen experiment scope")
     cfg = json.loads(Path(__file__).with_name(stage + ".json").read_text())

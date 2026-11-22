@@ -70,6 +70,39 @@ class QwenProgressTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             select_rate(rows.__getitem__)
 
+    def test_2b_model_pin_scope_order_and_fixed_recipe(self):
+        from profiles import TWO_B, stages_for
+        self.assertEqual(stages_for("2b-smoke"), ("smoke",))
+        full = profile("performance", "2b-all")
+        smoke = profile("smoke", "2b-smoke")
+        self.assertEqual(full["model"], TWO_B)
+        self.assertEqual(full["model_revision"], "15852e8c16360a2fea060d615a32b45270f8a8fc")
+        self.assertEqual(full["seeds"], [42, 43, 44])
+        self.assertEqual((smoke["max_steps"], smoke["checkpoint_step"], full["max_steps"]), (12, 6, 200))
+        for cfg in (smoke, full):
+            self.assertEqual((cfg["batch_size"], cfg["max_length"], cfg["gradient_accumulation_steps"]),
+                             (8, 512, 1))
+            self.assertEqual((cfg["muon_lr"], cfg["learning_rate"], cfg["expected_lora_matrices"]),
+                             (.002, .0002, 48))
+        self.assertEqual(full["eval_splits"], ["validation", "test"])
+        self.assertTrue(full["save_predictions"])
+        for seed in full["seeds"]:
+            scope = f"2b-seed-{seed}"
+            self.assertEqual(stages_for(scope), ("smoke", "performance"))
+            self.assertEqual(profile("performance", scope), dict(full, seeds=[seed], muon_first=seed == 43))
+        self.assertNotIn("save_predictions", profile("performance", "all"))
+        self.assertEqual(profile("performance", "all")["muon_lr"], .02)
+
+    def test_paired_prediction_evidence_checks_identity_and_metrics(self):
+        examples = [[7, 0], [5, 0], [8, 1], [2, 2]]
+        predictions = [[7, 0, 0], [5, 0, 1], [8, 1, 1], [2, 2, 2]]
+        metrics = {"eval_accuracy": .75, "eval_f1": .75}
+        controller.verify_predictions(examples, predictions, metrics, 4)
+        for bad in (predictions[::-1], predictions[:-1], [*predictions[:-1], [2, 2, 4]],
+                    [*predictions[:-1], [2, 2, 1]]):
+            with self.assertRaises(ValueError):
+                controller.verify_predictions(examples, bad, metrics, 4)
+
     def test_split_suite_keeps_the_original_arm_order(self):
         def order(scope):
             seen = []
