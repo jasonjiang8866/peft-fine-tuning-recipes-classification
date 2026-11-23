@@ -5,7 +5,7 @@ on:
       scope:
         type: choice
         description: Benchmark scope and model size (unprefixed scopes use 0.8B)
-        options: [seed-42, seeds-43-44, all, lr-sweep, 2b-smoke, 2b-seed-42, 2b-seed-43, 2b-seed-44, 2b-all]
+        options: [seed-42, seeds-43-44, all, lr-sweep, 2b-smoke, 2b-seed-42, 2b-seed-43, 2b-seed-44, 2b-all, 2b-seeds-45-47, 2b-seeds-48-50]
         default: seed-42
       remaining_usd:
         type: string

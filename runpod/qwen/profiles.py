@@ -6,8 +6,9 @@ from pathlib import Path
 
 TWO_B = "Qwen/Qwen3.5-2B"
 QWEN_TEXT_MODELS = {"Qwen/Qwen3.5-0.8B", TWO_B}
+CONFIRMATION_SEEDS = {"2b-seeds-45-47": [45, 46, 47], "2b-seeds-48-50": [48, 49, 50]}
 TWO_B_SEEDS = {"2b-smoke": [42], "2b-seed-42": [42], "2b-seed-43": [43],
-               "2b-seed-44": [44], "2b-all": [42, 43, 44]}
+               "2b-seed-44": [44], "2b-all": [42, 43, 44], **CONFIRMATION_SEEDS}
 
 
 def stages_for(scope):
@@ -27,7 +28,7 @@ def profile(stage, scope):
             cfg.update(batch_size=8, eval_batch_size=8, gradient_accumulation_steps=1, max_length=512)
         else:
             seeds = TWO_B_SEEDS[scope]
-            cfg.update(seeds=seeds, muon_first=seeds[0] == 43, eval_splits=["validation", "test"],
+            cfg.update(seeds=seeds, muon_first=bool(seeds[0] % 2), eval_splits=["validation", "test"],
                        save_predictions=True)
         return cfg
     if scope not in {"all", "seed-42", "seeds-43-44"}:
