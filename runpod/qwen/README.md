@@ -105,3 +105,50 @@ the pinned AG News train split for validation and test split for testing.
 The controller checks each row against the split manifest and recomputes
 accuracy and weighted F1. When combining separately dispatched seeds, check
 that the manifests and dataset digests match across artifacts.
+
+## 2B baseline and fresh-seed confirmation
+
+[Run 45059026463](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/45059026463)
+trained each arm for 200 steps on one RTX 4090. Timing averages steps 21–200.
+Memory is peak allocated training memory. Deltas use unrounded validation weighted F1.
+
+| Seed | AdamW F1 (%) | Muon F1 (%) | Muon − AdamW (pp) | Step ms (AdamW / Muon) | GiB (AdamW / Muon) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 42 | 91.519 | 91.517 | −0.001 | 1109 / 1193 | 18.02 / 18.00 |
+| 43 | 89.457 | 91.752 | +2.295 | 1108 / 1193 | 18.36 / 18.33 |
+| 44 | 91.286 | 90.675 | −0.611 | 1099 / 1194 | 17.56 / 17.55 |
+| Mean | 90.754 | 91.315 | +0.561 | 1105 / 1193 | 17.98 / 17.96 |
+
+Omitting seed 43 gives −0.306 pp. On the previously evaluated test subset,
+mean weighted F1 was 88.615% for AdamW and 89.320% for Muon.
+
+From the repository root, use Python 3.9+ to check the original Actions artifact
+ZIP and reproduce the table on CPU. The ZIP contains the allocation, worker and
+cleanup records. Its SHA-256 is
+`f4988a52bfcba16ec1fd19244ddf45e04075f70382c15076e37cd8a27d598ee6`.
+
+```sh
+python -S runpod/qwen/paired_report.py baseline baseline.zip
+```
+
+For confirmation, run the manual scopes `2b-seeds-45-47` and `2b-seeds-48-50`
+sequentially at the same commit. Use one RTX 4090 per batch and the same
+200-step recipe as the baseline. Odd seeds run Muon first and even seeds run
+AdamW first. Both batches start with the existing seed-42 checkpoint smoke.
+The previous three-pair allocation lasted 62.27 minutes at USD 0.89/hour.
+Allow USD 3 per batch including the USD 1 reserve. The runtime allowed by that
+budget varies with the live rate and tops out at 105 minutes.
+
+```sh
+python -S runpod/qwen/paired_report.py confirmation seeds-45-47.zip seeds-48-50.zip
+```
+
+Use the six new seeds for the primary analysis. For each seed, subtract AdamW
+validation weighted F1 from Muon validation weighted F1. Report the mean
+difference in percentage points, win/tie/loss counts on unrounded scores, and
+the range of the six leave-one-seed-out means. Recommend Muon as a
+quality-first option if the mean and every leave-one-out mean are positive.
+This is a sensitivity check across training seeds. Record step cost, peak
+memory and secondary test metrics alongside it. The CPU report verifies
+per-example predictions against the manifests, recomputes accuracy and
+weighted F1, and checks dataset and manifest hashes against the accepted baseline.

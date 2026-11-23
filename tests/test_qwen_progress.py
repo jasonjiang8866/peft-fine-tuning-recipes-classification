@@ -90,6 +90,9 @@ class QwenProgressTests(unittest.TestCase):
             scope = f"2b-seed-{seed}"
             self.assertEqual(stages_for(scope), ("smoke", "performance"))
             self.assertEqual(profile("performance", scope), dict(full, seeds=[seed], muon_first=seed == 43))
+        for scope, seeds in (("2b-seeds-45-47", [45, 46, 47]), ("2b-seeds-48-50", [48, 49, 50])):
+            self.assertEqual(profile("performance", scope), dict(full, seeds=seeds, muon_first=seeds[0] == 45))
+            self.assertEqual(profile("smoke", scope), smoke)
         self.assertNotIn("save_predictions", profile("performance", "all"))
         self.assertEqual(profile("performance", "all")["muon_lr"], .02)
 
@@ -113,6 +116,7 @@ class QwenProgressTests(unittest.TestCase):
                 write_json(Path(cmd[-1]) / "result.json",
                            {"timing": {"mean_ms": 1, "examples_per_second": 1},
                             "test": {"eval_accuracy": 1, "eval_f1": 1},
+                            "validation": {"eval_accuracy": 1, "eval_f1": 1},
                             "peak_cuda": {"train": {"allocated_mib": 1}}, "performance_eligible": True})
             with tempfile.TemporaryDirectory() as tmp:
                 config = Path(tmp) / "config.json"
@@ -127,6 +131,9 @@ class QwenProgressTests(unittest.TestCase):
         full = [(42, "adamw"), (42, "muon"), (43, "muon"), (43, "adamw"), (44, "adamw"), (44, "muon")]
         self.assertEqual(order("all"), full)
         self.assertEqual(order("seed-42") + order("seeds-43-44"), full)
+        self.assertEqual(order("2b-seeds-45-47") + order("2b-seeds-48-50"),
+                         [(s, mode) for s in range(45, 51)
+                          for mode in (("muon", "adamw") if s % 2 else ("adamw", "muon"))])
 
     def test_remaining_budget_reserves_cleanup_and_extras(self):
         for rate, expected in ((.89, 105), (1.39, 95), (2., 64)):
