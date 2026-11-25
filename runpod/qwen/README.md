@@ -152,3 +152,35 @@ This is a sensitivity check across training seeds. Record step cost, peak
 memory and secondary test metrics alongside it. The CPU report verifies
 per-example predictions against the manifests, recomputes accuracy and
 weighted F1, and checks dataset and manifest hashes against the accepted baseline.
+
+## Equal training time on Qwen3.5-2B
+
+Does the fixed-step quality gain persist at 180 seconds of synchronized
+optimizer-step time per arm? The manual scope `2b-equal-time-180s` uses
+one RTX 4090 and four fresh seeds (51–54). Odd seeds start with Muon and
+even seeds start with AdamW. The data, model revision, batch size and
+200-step linear learning-rate schedule match the fixed-step protocol.
+
+The timer includes every optimizer step from step 1 and all gradient
+accumulation within each step. Finish the first step that reaches 180 seconds,
+then evaluate on the original validation and test manifests. The report records
+the actual step count, cumulative step time including the final step, whole
+training-loop wall time, and end-of-training predictions. Loading and evaluation
+are outside the step budget. An arm that finishes 200 steps below 180 seconds
+is recorded as `step_limit`. If any arm misses the target the report lists the
+individual results and marks the four-pair comparison incomplete.
+
+Use at most USD 3 for the allocation, including USD 1 for extras. The controller
+reserves five minutes for cleanup within a 90-minute allocation window and
+shortens the work window when required by the live hourly price. To reproduce
+the report from the workflow's evidence ZIP, run this from the repository root.
+
+```sh
+python -S runpod/qwen/paired_report.py equal-time equal-time.zip
+```
+
+The primary endpoint is the four-seed mean of paired validation weighted F1
+differences (Muon minus AdamW, in percentage points). Report wins, ties, losses
+and the leave-one-seed-out range. Extend the quality-first recommendation to
+this budget only when the mean and all four leave-one-out means are positive.
+Test weighted F1 and accuracy are secondary.

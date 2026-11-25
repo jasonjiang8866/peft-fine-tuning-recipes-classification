@@ -1,4 +1,4 @@
-"""Reproduce the 2B baseline or summarize both fresh-seed batches on CPU."""
+"""Reproduce fixed-step and equal-time Qwen3.5-2B comparisons on CPU."""
 import argparse
 import json
 import math
@@ -7,7 +7,7 @@ from statistics import mean
 from zipfile import BadZipFile, ZipFile
 
 from controller import IMAGE, verify
-from profiles import CONFIRMATION_SEEDS, TWO_B_SEEDS
+from profiles import CONFIRMATION_SEEDS, EQUAL_TIME, TWO_B_SEEDS
 
 # Identities from the accepted 2b-all artifact (Actions run 45059026463).
 DATA_SHA256 = {
@@ -71,13 +71,21 @@ def read_batch(path, expected_scopes):
                 "step_ms": timing,
                 "train_peak_gib": peak / 1024,
             }
-        pair["validation_delta_pp"] = 100 * (pair["muon"]["validation_f1"] - pair["adamw"]["validation_f1"])
+            if scope == EQUAL_TIME:
+                budget = row["step_budget"]
+                pair[mode].update(global_steps=row["global_steps"], step_seconds=budget["elapsed_seconds"],
+                                  train_wall_seconds=row["train_wall_seconds"])
+                if budget["outcome"] != "reached":
+                    pair.setdefault("below_target", []).append(mode)
+        if "below_target" not in pair:
+            pair["validation_delta_pp"] = 100 * (pair["muon"]["validation_f1"] - pair["adamw"]["validation_f1"])
         pairs.append(pair)
     return scope, allocation["sha"], pairs
 
 
 def report(cohort, paths):
-    remaining = {"2b-all"} if cohort == "baseline" else set(CONFIRMATION_SEEDS)
+    scopes = {"baseline": {"2b-all"}, "confirmation": set(CONFIRMATION_SEEDS), "equal-time": {EQUAL_TIME}}
+    remaining = scopes[cohort]
     commits = set()
     pairs = []
     for path in paths:
@@ -90,11 +98,19 @@ def report(cohort, paths):
     if len(commits) != 1:
         raise ValueError("Batches used different training commits")
     pairs.sort(key=lambda pair: pair["seed"])
+    result = {"cohort": cohort, "commit": commits.pop(), "pairs": pairs}
+    if cohort == "equal-time":
+        complete = all("below_target" not in pair for pair in pairs)
+        result.update(target_seconds=180, comparison_status="complete" if complete else "incomplete")
+        if not complete:
+            return result
     deltas = [p["validation_delta_pp"] for p in pairs]
     leave_one_out = [mean(d for j, d in enumerate(deltas) if j != i) for i in range(len(deltas))]
     averages = {mode: {k: mean(p[mode][k] for p in pairs) for k in pairs[0][mode]} for mode in MODES}
+    if cohort == "equal-time":
+        result["quality_first_muon"] = mean(deltas) > 0 and min(leave_one_out) > 0
     return {
-        "cohort": cohort, "commit": commits.pop(), "pairs": pairs, "means": averages,
+        **result, "means": averages,
         "validation_delta_pp": mean(deltas),
         "muon_wins": sum(d > 0 for d in deltas), "ties": deltas.count(0),
         "adamw_wins": sum(d < 0 for d in deltas),
@@ -105,7 +121,7 @@ def report(cohort, paths):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("cohort", choices=["baseline", "confirmation"])
+    parser.add_argument("cohort", choices=["baseline", "confirmation", "equal-time"])
     parser.add_argument("archives", type=Path, nargs="+")
     args = parser.parse_args()
     try:
