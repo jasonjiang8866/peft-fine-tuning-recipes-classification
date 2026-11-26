@@ -13,7 +13,7 @@ from runpod.validate import ROOT, write_json
 
 with patch.object(sys, "path", [str(ROOT / "runpod/qwen"), *sys.path]):
     from runpod.qwen import controller, worker
-    from profiles import SCREEN_RATES, profile, select_rate, sweep_profile
+    from profiles import EQUAL_TIME, SCREEN_RATES, profile, select_rate, sweep_profile
 
 
 class QwenProgressTests(unittest.TestCase):
@@ -115,6 +115,7 @@ class QwenProgressTests(unittest.TestCase):
                 seen.append((seed, mode))
                 write_json(Path(cmd[-1]) / "result.json",
                            {"timing": {"mean_ms": 1, "examples_per_second": 1},
+                            "step_budget": {"outcome": "reached"}, "global_steps": 170,
                             "test": {"eval_accuracy": 1, "eval_f1": 1},
                             "validation": {"eval_accuracy": 1, "eval_f1": 1},
                             "peak_cuda": {"train": {"allocated_mib": 1}}, "performance_eligible": True})
@@ -134,6 +135,16 @@ class QwenProgressTests(unittest.TestCase):
         self.assertEqual(order("2b-seeds-45-47") + order("2b-seeds-48-50"),
                          [(s, mode) for s in range(45, 51)
                           for mode in (("muon", "adamw") if s % 2 else ("adamw", "muon"))])
+
+        self.assertEqual(order(EQUAL_TIME), [(s, m) for s in (51, 52, 53, 54)
+                         for m in (("muon", "adamw") if s % 2 else ("adamw", "muon"))])
+
+    def test_equal_time_scope_budget_and_smoke(self):
+        self.assertEqual(profile("smoke", EQUAL_TIME), profile("smoke", "2b-all"))
+        self.assertEqual(controller.allocation_minutes(3, .89, EQUAL_TIME), 85)
+        self.assertEqual(controller.allocation_minutes(3, 2, EQUAL_TIME), 55)
+        with self.assertRaises(ValueError):
+            controller.allocation_minutes(3.01, .89, EQUAL_TIME)
 
     def test_remaining_budget_reserves_cleanup_and_extras(self):
         for rate, expected in ((.89, 105), (1.39, 95), (2., 64)):

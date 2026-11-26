@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from runpod.qwen.profiles import QWEN_TEXT_MODELS
+from runpod.qwen.step_budget import step_budget_result
 
 
 def write_json(path, value):
@@ -49,6 +50,10 @@ def read_config(path):
         raise ValueError("Expected test, validation, or validation followed by test")
     if "modes" in c and c["modes"] != ["muon"]:
         raise ValueError("Only the Muon learning-rate screen may override paired mode order")
+    if "step_budget_seconds" in c:
+        seconds = c["step_budget_seconds"]
+        if type(seconds) is not int or seconds < 1 or c["checkpoint_step"] or c["skip_steps"]:
+            raise ValueError("Timed runs require positive whole seconds, no checkpoint and skip_steps=0")
     effective = c["batch_size"] * c["gradient_accumulation_steps"]
     if c["train_samples"] < effective or c["train_samples"] % effective:
         raise ValueError("train_samples must be a multiple of effective batch size")
@@ -261,7 +266,8 @@ def worker(c, output, mode, seed, resume=None):
         seed=seed, data_seed=seed, dataloader_num_workers=0, dataloader_drop_last=True,
         disable_tqdm=True)
     run = BenchmarkRun(mode, output, c["max_steps"], c["batch_size"], c["muon_lr"], c["skip_steps"])
-    kwargs = run.trainer_kwargs(model, args)
+    seconds = c.get("step_budget_seconds")
+    kwargs = run.trainer_kwargs(model, args, step_budget_seconds=seconds)
 
     class Audit(TrainerCallback):
         def __init__(self):
@@ -336,7 +342,10 @@ def worker(c, output, mode, seed, resume=None):
     train_peak = {"allocated_mib": torch.cuda.max_memory_allocated() / 2**20,
                   "reserved_mib": torch.cuda.max_memory_reserved() / 2**20}
     hook.remove()
-    if trainer.state.global_step != c["max_steps"] or not audit.autocast:
+    budget = None
+    if seconds is not None:
+        budget = step_budget_result(run.callback.times, trainer.state.global_step, c["max_steps"], seconds)
+    if (budget is None and trainer.state.global_step != c["max_steps"]) or not audit.autocast:
         raise RuntimeError("Missing requested steps or bf16 autocast evidence")
     from accelerate.optimizer import AcceleratedOptimizer
     if not isinstance(trainer.optimizer, AcceleratedOptimizer) or trainer.accelerator.mixed_precision != "bf16":
@@ -400,6 +409,9 @@ def worker(c, output, mode, seed, resume=None):
         "peak_cuda": {"load_allocated_mib": load_peak, "train": train_peak,
                       "eval_allocated_mib": torch.cuda.max_memory_allocated() / 2**20},
         "performance_eligible": not smoke and not resume}
+    if budget is not None:
+        report["step_budget"] = budget
+        report["performance_eligible"] = budget["outcome"] == "reached"
     if trace_resume:
         report["resume_trace"] = trace.rows
         report["smoke_kernels"] = {"cudnn_deterministic": torch.backends.cudnn.deterministic,
@@ -462,9 +474,10 @@ def summarize(output, records, split="test"):
         writer.writeheader()
         for row in records:
             writer.writerow({k: row[k] for k in columns})
+    complete_pairs = all(r.get("step_budget", {}).get("outcome") != "step_limit" for r in records)
     for mode in ("adamw", "muon"):
         eligible = [r for r in records if r["mode"] == mode and r["performance_eligible"]]
-        if eligible:
+        if eligible and complete_pairs:
             summary["aggregates"][mode] = {
                 key: {"mean": statistics.mean(r[key] for r in eligible),
                       "stdev": statistics.stdev(r[key] for r in eligible) if len(eligible) > 1 else None}
@@ -477,6 +490,8 @@ def summarize(output, records, split="test"):
     lines += ["", "Smoke runs include gradient probes/checkpoint I/O and are NOT performance measurements.",
               "Step timing is synchronized optimizer-step compute (including gradient accumulation), not end-to-end data throughput.",
               "See train_wall_seconds for training-loop wall time. Evaluation uses a fixed " + split + " subset."]
+    if not complete_pairs:
+        lines.append("At least one arm hit the step limit below its time target. The paired comparison is incomplete.")
     (output / "summary.md").write_text("\n".join(lines) + "\n")
 
 
@@ -524,6 +539,9 @@ def suite(config, output):
                                 "f1": report[split]["eval_f1"],
                                 "train_peak_mib": report["peak_cuda"]["train"]["allocated_mib"],
                                 "performance_eligible": report["performance_eligible"]})
+                if "step_budget_seconds" in c:
+                    records[-1]["step_budget"] = report["step_budget"]
+                    records[-1]["global_steps"] = report["global_steps"]
                 print(f"PASS {mode} seed={seed}; results: {run_dir}", flush=True)
         summarize(output, records, split)
         write_json(output / "status.json", {"status": "passed"})

@@ -10,7 +10,8 @@ import sys
 import time
 from urllib.parse import quote
 
-from profiles import TWO_B_SEEDS, SWEEP, profile, select_rate, stages_for, sweep_profile
+from step_budget import verify_timed_arm
+from profiles import EQUAL_TIME, TWO_B_SEEDS, SWEEP, profile, select_rate, stages_for, sweep_profile
 from provider import REPOSITORY, Runpod, budget, finite, identity, request
 
 OUT = Path("qwen-evidence")
@@ -67,10 +68,15 @@ def cleanup(api):
     raise RuntimeError("Pod absence unverified")
 
 
-def allocation_minutes(remaining, rate):
+def allocation_minutes(remaining, rate, scope=None):
     if not finite(remaining, .01) or remaining > 5 or not finite(rate, .001) or rate > RATE_CAP:
         raise ValueError("Invalid experiment allowance or hourly rate")
-    minutes = min(105, math.floor((remaining - EXTRAS_USD) * 60 / rate) - CLEANUP_MINUTES)
+    limit = 105
+    if scope == EQUAL_TIME:
+        if remaining > 3:
+            raise ValueError("Equal-time allowance exceeds USD 3")
+        limit = 90 - CLEANUP_MINUTES
+    minutes = min(limit, math.floor((remaining - EXTRAS_USD) * 60 / rate) - CLEANUP_MINUTES)
     if minutes < 1:
         raise ValueError("Remaining allowance cannot fund allocation and cleanup")
     return minutes
@@ -129,14 +135,16 @@ def verify(result, sha, pod, scope="all"):
             for mode in cfg.get("modes", ("adamw", "muon")):
                 prefix = f"{stage}/{mode}-{seed}"
                 row = read(prefix + "/result.json")
+                timed = "step_budget_seconds" in cfg
+                eligible = verify_timed_arm(row, cfg) if timed else stage != "smoke"
                 if (row["mode"] != mode or row["seed"] != seed or row["status"] != "passed"
                         or any(cfg[k] != row["config"][k] for k in cfg)
-                        or row["global_steps"] != cfg["max_steps"]
+                        or (not timed and row["global_steps"] != cfg["max_steps"])
                         or row["config"]["data_sha256"] != expected_hashes
-                        or row["performance_eligible"] != (stage != "smoke")
+                        or row["performance_eligible"] is not eligible
                         or not row["integration"]["bf16_autocast_observed"]
                         or row["integration"]["int8_linear_layers"] < 1
-                        or row["timing"]["timed_steps"] != cfg["max_steps"] - cfg["skip_steps"]):
+                        or row["timing"]["timed_steps"] != row["global_steps"] - cfg["skip_steps"]):
                     raise ValueError("Incomplete training evidence: " + prefix)
                 if scope == SWEEP or scope in TWO_B_SEEDS:
                     if ("test" in row) != ("test" in splits) or any(
@@ -165,7 +173,7 @@ def run(api):
         profile(stages_for(scope)[-1], scope)
     remaining = float(os.environ["QWEN_REMAINING_USD"])
     gpu, rate, regions = select(api, GPUS[:1] if scope == SWEEP or scope in TWO_B_SEEDS else GPUS)
-    minutes = allocation_minutes(remaining, rate)
+    minutes = allocation_minutes(remaining, rate, scope)
     save("budget.json", budget(api, reserve=remaining))
     state = dict(started=time.time(), gpu=gpu, rate=rate, regions=regions, image=IMAGE, sha=sha,
                  scope=scope, remaining_usd=remaining, allocation_minutes=minutes)
@@ -189,7 +197,7 @@ def run(api):
         raise RuntimeError("Allocated GPU or rate outside approved bounds")
     state.update(rate=detail["cost"], region=detail["dataCenterId"])
     save("allocation.json", state)
-    state["allocation_minutes"] = allocation_minutes(remaining, state["rate"])
+    state["allocation_minutes"] = allocation_minutes(remaining, state["rate"], scope)
     save("allocation.json", state)
     last_progress = None
     while time.time() < state["started"] + state["allocation_minutes"] * 60:

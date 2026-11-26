@@ -9,6 +9,44 @@ AVAILABLE = all(importlib.util.find_spec(m) for m in ("torch", "transformers", "
 
 @unittest.skipUnless(AVAILABLE, "optional Trainer integration dependencies not installed")
 class TrainerPairCPUTests(unittest.TestCase):
+    def test_time_budget_stops_trainer_with_original_scheduler_horizon(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import torch
+        from transformers import Trainer, TrainingArguments
+        from benchmark_muon import BenchmarkRun
+        from runpod.qwen.step_budget import step_budget_result
+
+        class Classifier(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.adapter = torch.nn.Sequential()
+                self.adapter.add_module("lora_A", torch.nn.Linear(2, 2, bias=False))
+                self.score = torch.nn.Linear(2, 2)
+
+            def forward(self, input_ids, labels):
+                logits = self.score(self.adapter(input_ids.float()))
+                return {"loss": torch.nn.functional.cross_entropy(logits, labels), "logits": logits}
+
+        data = [{"input_ids": [0, 1], "labels": 0}, {"input_ids": [1, 0], "labels": 1}]
+        with tempfile.TemporaryDirectory() as tmp:
+            for mode in ("adamw", "muon"):
+                with self.subTest(mode=mode):
+                    model = Classifier()
+                    args = TrainingArguments(output_dir=tmp, use_cpu=True, max_steps=200,
+                        warmup_steps=20, per_device_train_batch_size=2, learning_rate=2e-4,
+                        save_strategy="no", report_to="none", disable_tqdm=True)
+                    run = BenchmarkRun(mode, Path(tmp), 200, 2, .002, 0)
+                    kwargs = run.trainer_kwargs(model, args, step_budget_seconds=180)
+                    trainer = Trainer(model=model, args=args, train_dataset=data, **kwargs)
+                    ticks = iter([0, 60, 65, 125, 135, 195])
+                    with patch("benchmark_muon.time", SimpleNamespace(perf_counter=lambda: next(ticks))):
+                        trainer.train()
+                    self.assertEqual(trainer.state.global_step, 3)
+                    self.assertEqual(trainer.state.max_steps, 200)
+                    self.assertAlmostEqual(trainer.lr_scheduler.get_last_lr()[-1], 2e-4 * 3 / 20)
+                    self.assertEqual(step_budget_result(run.callback.times, 3, 200, 180)["elapsed_seconds"], 180)
+
     def test_real_trainer_peft_checkpoint_resume_both_arms(self):
         import torch
         from peft import LoraConfig, get_peft_model

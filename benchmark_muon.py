@@ -131,7 +131,7 @@ class BenchmarkRun:
         if self.max_steps:
             args.max_steps = self.max_steps
 
-    def trainer_kwargs(self, model, args):
+    def trainer_kwargs(self, model, args, step_budget_seconds=None):
         from transformers import TrainerCallback
         import torch
 
@@ -147,6 +147,7 @@ class BenchmarkRun:
             def __init__(self):
                 self.started = None
                 self.times = []
+                self.elapsed_ms = 0.0
 
             @staticmethod
             def synchronize():
@@ -159,8 +160,12 @@ class BenchmarkRun:
 
             def on_step_end(self, args, state, control, **kwargs):
                 self.synchronize()
-                self.times.append({"step": state.global_step,
-                                   "ms": (time.perf_counter() - self.started) * 1000})
+                ms = (time.perf_counter() - self.started) * 1000
+                self.times.append({"step": state.global_step, "ms": ms})
+                if step_budget_seconds is not None:
+                    self.elapsed_ms += ms
+                    if self.elapsed_ms >= step_budget_seconds * 1000:
+                        control.should_training_stop = True
 
         self.callback = StepTimer()
         result = {"callbacks": [self.callback]}

@@ -6,9 +6,11 @@ from pathlib import Path
 
 TWO_B = "Qwen/Qwen3.5-2B"
 QWEN_TEXT_MODELS = {"Qwen/Qwen3.5-0.8B", TWO_B}
+EQUAL_TIME = "2b-equal-time-180s"
 CONFIRMATION_SEEDS = {"2b-seeds-45-47": [45, 46, 47], "2b-seeds-48-50": [48, 49, 50]}
 TWO_B_SEEDS = {"2b-smoke": [42], "2b-seed-42": [42], "2b-seed-43": [43],
-               "2b-seed-44": [44], "2b-all": [42, 43, 44], **CONFIRMATION_SEEDS}
+               "2b-seed-44": [44], "2b-all": [42, 43, 44], **CONFIRMATION_SEEDS,
+               EQUAL_TIME: [51, 52, 53, 54]}
 
 
 def stages_for(scope):
@@ -30,6 +32,8 @@ def profile(stage, scope):
             seeds = TWO_B_SEEDS[scope]
             cfg.update(seeds=seeds, muon_first=bool(seeds[0] % 2), eval_splits=["validation", "test"],
                        save_predictions=True)
+            if scope == EQUAL_TIME:
+                cfg.update(step_budget_seconds=180, skip_steps=0)
         return cfg
     if scope not in {"all", "seed-42", "seeds-43-44"}:
         raise ValueError("Unknown Qwen experiment scope")
