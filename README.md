@@ -122,10 +122,10 @@ uv run python training.py
 
 ## Optional Muon benchmark
 
-On Qwen3.5-2B and AG News, Muon improved mean validation weighted F1 by
-0.561 percentage points over AdamW across three seeds and took 7.98% longer per
-training step on an RTX 4090. Seed 43 accounted for the gain.
-[Per-seed results and reproduction](runpod/qwen/README.md#2b-baseline-and-fresh-seed-confirmation)
+On Qwen3.5-2B and AG News, Muon won 5 of 6 fresh seeds at 200 steps on an RTX 4090.
+Mean validation weighted F1 reached **91.178% with Muon** and **90.856% with AdamW**
+(+0.322 percentage points). Muon took 6.81% longer per training step.
+[Per-seed results, original runs and CPU reproduction](runpod/qwen/README.md#six-fresh-seeds-at-200-steps)
 
 `python training.py` and `python setup.py train` still use Hugging Face Trainer's
 default AdamW optimizer. To compare that path with built-in `torch.optim.Muon`,

@@ -108,6 +108,45 @@ that the manifests and dataset digests match across artifacts.
 
 ## 2B baseline and fresh-seed confirmation
 
+### Six fresh seeds at 200 steps
+
+On AG News, both optimizers fine-tuned the same Qwen3.5-2B revision for 200 steps
+per seed. Each pair used one RTX 4090 and the same training and evaluation examples.
+The table reports validation weighted F1, mean step time over steps 21–200 and peak
+allocated training memory. Differences use unrounded F1.
+
+| Seed | AdamW F1 (%) | Muon F1 (%) | Muon − AdamW (pp) | Step ms (AdamW / Muon) | GiB (AdamW / Muon) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 45 | 90.850 | 89.630 | -1.220 | 934 / 999 | 14.19 / 14.18 |
+| 46 | 91.597 | 91.897 | +0.300 | 947 / 988 | 14.59 / 14.57 |
+| 47 | 89.606 | 91.281 | +1.674 | 952 / 990 | 14.32 / 14.30 |
+| 48 | 89.981 | 90.330 | +0.349 | 1079 / 1176 | 11.89 / 11.86 |
+| 49 | 91.624 | 91.658 | +0.034 | 1104 / 1180 | 14.01 / 14.00 |
+| 50 | 91.480 | 92.272 | +0.792 | 1085 / 1182 | 14.33 / 14.31 |
+| Mean | 90.856 | 91.178 | +0.322 | 1017 / 1086 | 13.89 / 13.87 |
+
+Muon won five pairs and AdamW won one. Removing each seed in turn gave mean
+differences from +0.051 to +0.630 percentage points. These six seeds satisfied
+the prespecified quality-first rule for this fixed-step recipe. Muon took 6.81%
+longer per step. On the previously evaluated test subset, mean weighted F1 was
+88.292% for AdamW and 88.563% for Muon.
+
+Both batches ran commit `6592992e65c9eb2c569db1366e88c2ad4395a285`.
+Download the **qwen-optimizer-evidence** ZIP from each run using the filenames below.
+
+| Archive | Actions run | SHA-256 |
+| --- | --- | --- |
+| `seeds-45-47.zip` | [Seeds 45–47](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/45293779666) | `06a44aa5dc5992495757f954cd695b9b5ea9156aa277e927baef0510939a6b4e` |
+| `seeds-48-50.zip` | [Seeds 48–50](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/45293914752) | `867f6865f2d0723efa9064bc12d42bc88f1b6dc941552e65fcd6791bf8f474d3` |
+
+From the repository root, recompute the paired results from 24,576 prediction rows.
+
+```sh
+python -S runpod/qwen/paired_report.py confirmation seeds-45-47.zip seeds-48-50.zip
+```
+
+### Original three-seed baseline
+
 [Run 45059026463](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/45059026463)
 trained each arm for 200 steps on one RTX 4090. Timing averages steps 21–200.
 Memory is peak allocated training memory. Deltas use unrounded validation weighted F1.
