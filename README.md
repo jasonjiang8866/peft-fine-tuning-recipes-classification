@@ -12,6 +12,10 @@ A collection of Parameter Efficient Fine-Tuning (PEFT) recipes for text classifi
 
 ## Quick Start
 
+For an isolated **local RTX 5090 / single-GPU Muon vs AdamW smoke test**,
+see [local_gpu/README.md](local_gpu/README.md). It reuses the RunPod validation
+suite without launching a cloud GPU or changing the normal training environment.
+
 ### Prerequisites
 
 - Python 3.9 or higher
