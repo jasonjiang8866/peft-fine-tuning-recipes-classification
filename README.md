@@ -1,6 +1,36 @@
 # PEFT Fine-tuning Recipes for Classification
 
-A collection of Parameter Efficient Fine-Tuning (PEFT) recipes for text classification tasks using LoRA (Low-Rank Adaptation) and Llama models. This repository demonstrates how to fine-tune large language models efficiently for classification tasks using quantization and LoRA adapters.
+This repository contains LoRA recipes for text classification with quantized language models. The default training script uses Llama-3.2-1B-Instruct. The Qwen3.5-0.8B benchmark compares AdamW and Muon on AG News.
+
+## Qwen3.5-0.8B optimizer results
+
+### Fixed Muon learning rate (0.02)
+
+On AG News, AdamW reached **88.48% mean test accuracy** across three training seeds. Muon on the LoRA matrices reached **82.75%**. AdamW led by 3.52–7.23 percentage points in the paired runs.
+
+| Training seed | AdamW accuracy | Muon accuracy | AdamW weighted F1 | Muon weighted F1 |
+| --- | ---: | ---: | ---: | ---: |
+| 42 | 88.87% | 81.64% | 0.8883 | 0.8150 |
+| 43 | 88.28% | 81.84% | 0.8826 | 0.8195 |
+| 44 | 88.28% | 84.77% | 0.8825 | 0.8467 |
+| **Mean** | **88.48%** | **82.75%** | **0.8845** | **0.8271** |
+
+Each pair trained for 200 optimizer steps on the same RTX 4090 and used the same 1,024 test examples. Both arms used an 8-bit frozen backbone, bf16 compute and 48 rank-16 LoRA matrices. AdamW used a peak learning rate of `2e-4`. The Muon arm used `0.02` for the adapters and AdamW at `2e-4` for the classification head. The comparison covers these fixed learning rates and this training budget.
+
+After excluding the first 20 steps of each run, mean synchronized step time was **1.098 s for AdamW** and **1.135 s for Muon**. Both optimizers also passed the separate 12-step checkpoint test, with zero maximum tensor difference between uninterrupted and resumed runs.
+
+[Seed 42 run](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/44840725315) · [Seeds 43 and 44 run](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/44843308233) · [Reproduction guide](runpod/qwen/README.md) · [Training profile](runpod/qwen/performance.json)
+
+### Validation-selected Muon learning rate (0.002)
+
+At seed 42, Muon validation weighted F1 was 0.8599 at 0.02, 0.8648 at 0.006 and **0.9079 at 0.002**. AdamW scored 0.9083. The screen used 1,024 stratified examples held out from the AG News training split. The winning rate was locked before confirmation. Each optimizer used its own fresh 200-step run for each confirmation seed.
+
+| Seed | Validation F1, AdamW / Muon | Test F1, AdamW / Muon | Test accuracy, AdamW / Muon |
+| --- | --- | --- | --- |
+| 43 | 0.9061 / 0.9089 | 0.8766 / 0.8856 | 87.70% / 88.57% |
+| 44 | 0.8979 / 0.8780 | 0.8787 / 0.8818 | 87.89% / 88.18% |
+
+Muon led by 0.59 percentage points in mean accuracy on the previously used 1,024 test examples. Validation F1 favored a different optimizer at each seed. Mean synchronized step time was 1.011 s for AdamW and 1.107 s for Muon on the same RTX 4090. [Learning-rate screen and paired confirmation](https://github.com/jasonjiang8866/peft-fine-tuning-recipes-classification/actions/runs/45010941362)
 
 ## Features
 
@@ -120,7 +150,7 @@ uv run python training.py
    jupyter notebook finetuning.ipynb
    ```
 
-## Optional Muon benchmark
+## Optional Llama Muon benchmark
 
 On Qwen3.5-2B and AG News, Muon won 5 of 6 fresh seeds at 200 steps on an RTX 4090.
 Mean validation weighted F1 reached **91.178% with Muon** and **90.856% with AdamW**
@@ -233,11 +263,7 @@ Trainer/Accelerate version, mixed precision, checkpoint orchestration, or
 integrations that inspect optimizer internals. Benchmark checkpoints remain
 disabled, and distributed execution is outside this runner's scope.
 
-The actual 8-bit/bf16 PEFT recipe still needs the CUDA smoke run above to
-validate Trainer/Accelerate wrapping, quantized model gradients, device
-placement, and callbacks. CUDA timing/memory measurements and any performance
-or convergence comparison require real GPU runs; passing CI supplies none of
-those results. No default dependency requirement or lockfile is changed.
+The Llama recipe still needs its own CUDA validation. The [Qwen3.5-0.8B results](#qwen35-08b-optimizer-results) above cover the separate Qwen training profile.
 
 ## Training Results Visualization
 
